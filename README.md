@@ -37,7 +37,19 @@ python -m scraper.cli \
   --classify
 ```
 
-`--url` can be repeated. `--classify` is optional and requires the Ollama configuration. The final array is written to the requested path; the raw, unclassified array is written beside it as `products.raw.json`. The CLI prints only a count and output path.
+`--url` can be repeated. To discover all product URLs from Kosik's public product sitemap instead, run:
+
+```bash
+python -m scraper.cli --all-products --output output/products.json --classify
+```
+
+To test discovery from a specific category whitelist, run:
+
+```bash
+python -m scraper.cli --category-products --output output/category-products.json --classify
+```
+
+The initial whitelist contains only Kosik's bacon category (`/c3365-slaniny`) in `scraper/crawler.py`. Add exact category paths to `_CATEGORY_WHITELIST` to expand the crawl. Use exactly one of `--url`, `--all-products`, or `--category-products`. The category mode reads the categories sitemap, visits only whitelisted pages, and gathers product links before scraping. `--classify` is optional and requires the Ollama configuration. The final array is written to the requested path; the raw, unclassified array is written beside it as `category-products.raw.json`. The CLI prints only a count and output path.
 
 Example product output:
 

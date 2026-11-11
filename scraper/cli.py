@@ -11,12 +11,24 @@ from pathlib import Path
 from qwen_classifier.client import QwenClassifier
 
 from .config import get_scraper_settings
+from .crawler import KosikCrawler
 from .pipeline import ScrapingPipeline
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Scrape public Kosik product pages")
-    parser.add_argument("--url", action="append", required=True, help="Kosik product URL; may be repeated")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--url", action="append", help="Kosik product URL; may be repeated")
+    source.add_argument(
+        "--all-products",
+        action="store_true",
+        help="Discover product URLs from Kosik's public product sitemap",
+    )
+    source.add_argument(
+        "--category-products",
+        action="store_true",
+        help="Discover products from the category whitelist in scraper/crawler.py",
+    )
     parser.add_argument("--output", required=True, help="Final JSON output path")
     parser.add_argument("--classify", action="store_true", help="Classify product names with Qwen")
     return parser.parse_args()
@@ -26,8 +38,15 @@ async def _run(args: argparse.Namespace) -> int:
     settings = get_scraper_settings()
     classifier = QwenClassifier() if args.classify else None
     try:
-        pipeline = ScrapingPipeline(classifier=classifier, settings=settings)
-        raw_products = await pipeline.scrape_many(args.url, classify=False)
+        crawler = KosikCrawler(settings)
+        if args.category_products:
+            urls = await crawler.discover_category_product_urls()
+        elif args.all_products:
+            urls = await crawler.discover_product_urls()
+        else:
+            urls = args.url or []
+        pipeline = ScrapingPipeline(crawler=crawler, classifier=classifier, settings=settings)
+        raw_products = await pipeline.scrape_many(urls, classify=False)
         products = [pipeline.classify_product(product) for product in raw_products] if args.classify else raw_products
         output = Path(args.output)
         output.parent.mkdir(parents=True, exist_ok=True)
