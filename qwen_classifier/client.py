@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 
 import httpx
 
 from .config import Settings, get_settings
-from .models import ProductClassification
-from .prompts import build_classification_prompt
+from .models import ClassificationInput, ProductClassification
+from .prompts import PROMPT_VERSION, build_classification_prompt
 
 JSON_SCHEMA = {
     "type": "array",
@@ -40,7 +41,19 @@ class QwenClassifier:
         self.settings = settings or get_settings()
         self._client = http_client or httpx.Client(timeout=self.settings.timeout_seconds)
 
-    def classify(self, products: list[str], mark_needs_review: bool = False) -> list[ProductClassification]:
+    @property
+    def model_name(self) -> str:
+        return self.settings.model
+
+    @property
+    def prompt_version(self) -> str:
+        return PROMPT_VERSION
+
+    def classify(
+        self,
+        products: Sequence[str | ClassificationInput],
+        mark_needs_review: bool = False,
+    ) -> list[ProductClassification]:
         if not products:
             return []
 
@@ -63,7 +76,10 @@ class QwenClassifier:
                 headers=headers,
             )
         except httpx.TimeoutException as exc:
-            raise RuntimeError("Request to Ollama timed out") from exc
+            raise RuntimeError(
+                f"Request to Ollama timed out after {self.settings.timeout_seconds:g} s "
+                "(raise OLLAMA_TIMEOUT_SECONDS if needed)"
+            ) from exc
         except httpx.RequestError as exc:
             raise RuntimeError(f"Request to Ollama failed: {exc}") from exc
 

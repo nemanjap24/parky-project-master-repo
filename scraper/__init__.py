@@ -1,5 +1,5 @@
 """Crawl4AI-based Kosik product scraper."""
 
-from .models import ScrapedProduct
+from .models import ProductObservation
 
-__all__ = ["ScrapedProduct"]
+__all__ = ["ProductObservation"]

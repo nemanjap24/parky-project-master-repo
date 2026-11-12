@@ -109,3 +109,22 @@ def test_more_objects_than_input(settings: Settings) -> None:
 
     with pytest.raises(RuntimeError, match="Qwen returned more classifications than input products"):
         classifier.classify(["A"])
+
+
+def test_classify_accepts_breadcrumb_inputs_and_exposes_metadata(settings: Settings) -> None:
+    from qwen_classifier.models import ClassificationInput
+    from qwen_classifier.prompts import PROMPT_VERSION
+
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["prompt"] = __import__("json").loads(request.content.decode("utf-8"))["prompt"]
+        return httpx.Response(200, json={"response": '[{"name":"Párky","category":"masove_vyrobky","confidence":0.9}]'})
+
+    classifier = QwenClassifier(settings=settings, http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+    result = classifier.classify([ClassificationInput(name="Párky", retailer_category_path=["Údeniny a lahôdky", "Párky"])])
+
+    assert result[0].category == "masove_vyrobky"
+    assert "retailer category: Údeniny a lahôdky > Párky" in captured["prompt"]
+    assert classifier.model_name == "qwen3:30b"
+    assert classifier.prompt_version == PROMPT_VERSION

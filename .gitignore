@@ -222,3 +222,4 @@ __marimo__/
 # Scraper-generated output
 scraper/output/
 output/
+/.idea/
