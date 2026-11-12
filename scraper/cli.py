@@ -1,55 +1,78 @@
-"""Command-line interface for scraping Kosik products."""
+"""Command-line interface for scraping Kosik products into JSONL."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import sys
+from collections.abc import Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 
-from qwen_classifier.client import QwenClassifier
-
 from .config import get_scraper_settings
+from .output import JsonlWriter, default_output_path, next_run_id
 from .pipeline import ScrapingPipeline
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Scrape public Kosik product pages")
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Scrape public Kosik product pages into JSONL observations")
     parser.add_argument("--url", action="append", required=True, help="Kosik product URL; may be repeated")
-    parser.add_argument("--output", required=True, help="Final JSON output path")
-    parser.add_argument("--classify", action="store_true", help="Classify product names with Qwen")
-    return parser.parse_args()
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="JSONL file to append to (default: output/kosik/<YYYY-MM-DD>/observations.jsonl)",
+    )
+    parser.add_argument("--source-listing-url", default=None, help="Category page the URLs were collected from")
+    parser.add_argument("--classify", action="store_true", help="Classify products with Qwen")
+    return parser.parse_args(argv)
 
 
-async def _run(args: argparse.Namespace) -> int:
-    settings = get_scraper_settings()
-    classifier = QwenClassifier() if args.classify else None
+async def run(
+    args: argparse.Namespace,
+    pipeline: ScrapingPipeline | None = None,
+    now: datetime | None = None,
+) -> tuple[Path, str, int]:
+    """Scrape ``args.url`` and append one JSONL line per product.
+
+    Returns the output path, the run id and the number of written records.
+    ``pipeline`` and ``now`` are injectable for offline tests.
+    """
+
+    started = now or datetime.now(timezone.utc)
+    output: Path = args.output or default_output_path(started.date())
+    run_id = next_run_id(started.date(), output)
+    classifier = None
+    if pipeline is None:
+        if args.classify:
+            from qwen_classifier.client import QwenClassifier
+
+            classifier = QwenClassifier()
+        pipeline = ScrapingPipeline(classifier=classifier, settings=get_scraper_settings())
+    pipeline.run_id = run_id
     try:
-        pipeline = ScrapingPipeline(classifier=classifier, settings=settings)
-        raw_products = await pipeline.scrape_many(args.url, classify=False)
-        products = [pipeline.classify_product(product) for product in raw_products] if args.classify else raw_products
-        output = Path(args.output)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        raw_payload = [product.model_dump(mode="json") for product in raw_products]
-        payload = [product.model_dump(mode="json") for product in products]
-        output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        raw_path = output.with_name(f"{output.stem}.raw{output.suffix}")
-        raw_path.write_text(json.dumps(raw_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"Scraped {len(products)} product(s); saved {output}")
-        return 0
+        with JsonlWriter(output) as writer:
+            await pipeline.scrape_many(
+                args.url,
+                classify=args.classify,
+                source_listing_url=args.source_listing_url,
+                on_result=writer.write,
+            )
+            return output, run_id, writer.count
     finally:
         if classifier is not None:
             classifier.close()
 
 
-def main() -> int:
-    args = parse_args()
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(argv)
     try:
-        return asyncio.run(_run(args))
+        output, run_id, count = asyncio.run(run(args))
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+    print(f"Run {run_id}: scraped {count} product(s); appended to {output}")
+    return 0
 
 
 if __name__ == "__main__":

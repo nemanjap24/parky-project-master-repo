@@ -39,14 +39,22 @@ class ScrapingPipeline:
         classifier: Classifier | None = None,
         settings: ScraperSettings | None = None,
         clock: Callable[[], datetime] = _utc_now,
+        run_id: str | None = None,
     ) -> None:
         self.settings = settings or get_scraper_settings()
         self.crawler = crawler or KosikCrawler(self.settings)
         self.classifier = classifier
         self.clock = clock
+        self.run_id = run_id
 
-    async def scrape(self, url: str, classify: bool | None = None) -> ProductObservation:
+    async def scrape(
+        self,
+        url: str,
+        classify: bool | None = None,
+        source_listing_url: str | None = None,
+    ) -> ProductObservation:
         product = extract_product(await self.crawler.crawl(url), url, scraped_at=self.clock())
+        product = product.model_copy(update={"run_id": self.run_id, "source_listing_url": source_listing_url})
         enabled = self.settings.classification_enabled if classify is None else classify
         if not enabled:
             return product
@@ -89,5 +97,23 @@ class ScrapingPipeline:
             }
         )
 
-    async def scrape_many(self, urls: Sequence[str], classify: bool | None = None) -> list[ProductObservation]:
-        return [await self.scrape(url, classify=classify) for url in urls]
+    async def scrape_many(
+        self,
+        urls: Sequence[str],
+        classify: bool | None = None,
+        source_listing_url: str | None = None,
+        on_result: Callable[[ProductObservation], None] | None = None,
+    ) -> list[ProductObservation]:
+        """Scrape URLs sequentially (rate-limited by the crawler), e.g. one listing batch.
+
+        ``on_result`` is called after each product, so results can be persisted
+        before the whole batch finishes.
+        """
+
+        results: list[ProductObservation] = []
+        for url in urls:
+            product = await self.scrape(url, classify=classify, source_listing_url=source_listing_url)
+            if on_result is not None:
+                on_result(product)
+            results.append(product)
+        return results
