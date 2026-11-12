@@ -4,15 +4,17 @@
 
 `parky-scraper` is the data-collection and classification prototype for the academic **AI PARKY** project. The wider platform is intended to collect competitor and market prices, normalize and match product data, analyze historical price movements, forecast prices, recommend selling prices, and visualize those results.
 
-The current repository deliberately covers only an early slice of that goal: scrape publicly accessible JavaScript-rendered product pages from `kosik.sk`, extract product fields, optionally classify product titles through Qwen/Ollama, and write JSON. It does **not** yet provide a database, multi-retailer integration, scheduling, matching, analytics, forecasts, recommendation logic, frontend, or deployment.
+The current repository deliberately covers only an early slice of that goal: scrape publicly accessible JavaScript-rendered product pages from `kosik.sk`, extract a typed product observation (schema 0.2: static product data plus one price observation), optionally classify it through Qwen/Ollama using Kosik's breadcrumb, and append it to daily JSONL files. It does **not** yet provide a database, multi-retailer integration, scheduling, matching, analytics, forecasts, recommendation logic, frontend, or deployment.
 
 ## Repository structure
 
 | Path | Responsibility and main entry points |
 | --- | --- |
-| `scraper/` | Kosik scraping package. `crawler.py` contains `KosikCrawler`; `extraction.py` contains `extract_product`; `models.py` defines `ScrapedProduct`; `pipeline.py` coordinates scraping and optional classification; `config.py` reads scraper settings; `cli.py` is run with `python -m scraper.cli`. `fixtures/` contains local rendered-HTML samples and `tests/` covers extraction, models, and pipeline behavior. |
+| `scraper/` | Kosik scraping package. `crawler.py` contains `KosikCrawler`; `extraction.py` contains `extract_product`; `jsonld.py` parses schema.org JSON-LD; `promotions.py` parses Multikup tiers and discount labels; `package.py` normalizes package sizes; `validation.py` computes unit prices and warning codes; `models.py` defines `ProductObservation` and its nested models; `pipeline.py` coordinates scraping and optional classification; `output.py` writes JSONL and assigns run ids; `config.py` reads scraper settings; `cli.py` is run with `python -m scraper.cli`. `fixtures/kosik_*.html` are six real rendered Kosik pages used by regression tests; `tests/` covers parsing, models, validation, pipeline, and output. |
 | `qwen_classifier/` | Qwen/Ollama classification package. `client.py` contains `QwenClassifier`; `prompts.py` builds the constrained classification prompt; `models.py` defines Pydantic response contracts; `config.py` reads Ollama settings; `cli.py` is run with `python -m qwen_classifier.cli`. Its `tests/` validate prompts, models, and mocked HTTP behavior. |
 | `README.md` | User-facing setup, configuration, usage, architecture summary, and test documentation. |
+| `docs/output-format.md` | Field-by-field description of the JSONL output and warning codes; the basis for the future database schema. Keep it in sync with `scraper/models.py`. |
+| `docs/scraper-model-v2.md` | Task specification that introduced output schema 0.2. |
 | `requirements.txt` | Runtime and test dependencies: Crawl4AI, HTTP client, Pydantic, dotenv, and pytest. |
 | `.env.example` | Template for required local scraper and Ollama configuration. Copy it to `.env`; do not put real credentials in it. |
 | `pytest.ini` | Pytest configuration; adds the repository root to `pythonpath`. |
@@ -21,32 +23,32 @@ The current repository deliberately covers only an early slice of that goal: scr
 ## Current architecture
 
 ```text
-URL produktu
+URL produktu (+ source_listing_url)
    |
    v
-KosikCrawler
+KosikCrawler (rendered HTML)
    |
    v
 extract_product
+   |-- parse_product_json_ld   (sku, name, brand, price, currency, stock, breadcrumb)
+   |-- HTML                    (package, unit price, promotions, origin, shelf life, fallbacks)
+   |-- observation_warnings    (consistency checks -> extraction.warnings)
+   v
+ProductObservation
+   |
+   +--> [optional] QwenClassifier (name + breadcrumb) -> classification
    |
    v
-ScrapedProduct
-   |
-   +--> products.raw.json
-   |
-   +--> QwenClassifier
-           |
-           v
-        products.json
+JsonlWriter -> output/kosik/<YYYY-MM-DD>/observations.jsonl (append, 1 line = 1 product)
 ```
 
 `KosikCrawler` accepts only public `kosik.sk` URLs, applies the configured request delay, and renders the page with headless Crawl4AI/Playwright. Those browser components are required because the product content is JavaScript-rendered; the crawler waits for the populated Kosik application before returning HTML.
 
-`extract_product` deterministically parses rendered HTML into a `ScrapedProduct`: title, price, regular price, unit price, weight/volume, availability, brand, discount state, URL, and scrape timestamp. `ScrapedProduct` is a Pydantic contract and carries optional classification fields.
+`extract_product` deterministically turns a rendered page into a `ProductObservation`. JSON-LD (`Product`, `Offer` referenced by `@id`, `BreadcrumbList`) is the primary source for identity, `shelf_price`, currency, `in_stock`, and the Kosik category. HTML provides the package size, unit price, crossed-out price, promotions (`discount`, `multibuy`, `price_match`), country of origin, and minimum shelf life, and serves as a fallback. `shelf_price` is the unconditional one-piece price and must never come from Multikup tiers. Problems never raise: they are appended as codes to `extraction.warnings`, and `needs_review` is derived from that list. Prices are `Decimal` and serialized as JSON numbers. `docs/output-format.md` lists every field and warning code.
 
-`ScrapingPipeline` injects the crawler and an optional classifier. When classification is selected, it passes the product `raw_title` to `QwenClassifier`, then merges category, subcategory, confidence, and `needs_review` into the product. The Qwen client calls Ollama's `/api/generate` using `qwen3:30b` by default, with `stream=false`, `think=false`, temperature `0`, a JSON schema, and Pydantic validation. Its eight supported broad categories are `masove_vyrobky`, `mliecne_vyrobky`, `pekaren`, `ovocie_zelenina`, `napoje`, `mrazene`, `sladkosti`, and `ine`.
+`ScrapingPipeline` injects the crawler, an optional classifier, a clock, and the `run_id`. `scrape_many(urls, source_listing_url=..., on_result=...)` is the batch entry point for the category crawler; it scrapes sequentially, and `on_result` lets callers persist each record immediately. When classification is selected, the pipeline sends a `ClassificationInput` (name plus `retailer_category_path`) to `QwenClassifier`. It stores `classification` with category, subcategory, confidence, model, `prompt_version`, and `classified_at`, and adds `low_classification_confidence` when the confidence is below the threshold. The Qwen client calls Ollama's `/api/generate` using `qwen3:30b` by default, with `stream=false`, `think=false`, temperature `0`, a JSON schema, and Pydantic validation. The prompt (`PROMPT_VERSION` in `qwen_classifier/prompts.py`; bump it whenever the prompt changes) makes the breadcrumb the primary signal. Its eight supported broad categories are `masove_vyrobky`, `mliecne_vyrobky`, `pekaren`, `ovocie_zelenina`, `napoje`, `mrazene`, `sladkosti`, and `ine`.
 
-The scraper CLI always writes the unclassified scrape results beside the requested output as `products.raw.json` (for example, `output/products.raw.json`). With `--classify`, the requested `products.json` contains merged classification fields; without it, the requested output and raw output contain the same unclassified records. The standalone classifier CLI writes and prints classifications for supplied product names.
+The scraper CLI appends records to `output/kosik/<YYYY-MM-DD>/observations.jsonl` (UTC date at run start) or to the `--output` path. It assigns a `run_id` like `2026-11-14-kosik-01`, numbered after the highest id already in that file. With `--classify` the records include `classification`; there is no separate raw file. The standalone classifier CLI writes and prints classifications for supplied product names.
 
 ## Commands
 
@@ -62,21 +64,21 @@ pytest
 
 For live Crawl4AI scraping, install the browser dependencies required by the installed Crawl4AI release before running a scrape.
 
-Scrape without classification:
+Scrape without classification (appends to `output/kosik/<YYYY-MM-DD>/observations.jsonl`):
 
 ```bash
 python -m scraper.cli \
-  --url "https://www.kosik.sk/p39112-citrony" \
-  --output output/products.json
+  --url "https://www.kosik.sk/p39112-citrony"
 ```
 
-Scrape with Qwen/Ollama classification:
+Scrape a listing batch with Qwen/Ollama classification into a custom file:
 
 ```bash
 python -m scraper.cli \
-  --url "https://www.kosik.sk/p39112-citrony" \
-  --url "https://www.kosik.sk/p1952-mccain-golden-longs-hranolky" \
-  --output output/products.json \
+  --url "https://www.kosik.sk/p7004-nord-svit-zlate-parky-93-maesa" \
+  --url "https://www.kosik.sk/p6902-tauris-zipser-parky-71-maesa" \
+  --source-listing-url "https://www.kosik.sk/c3350-parky" \
+  --output output/parky.jsonl \
   --classify
 ```
 
@@ -115,6 +117,8 @@ python -m qwen_classifier.cli \
 - [ ] Prefer small, focused modules over broad utility layers.
 - [ ] Add or update tests for every new behavior.
 - [ ] Update both `README.md` and this file when user-visible behavior or architecture changes.
+- [ ] When output fields change, update `docs/output-format.md` and bump `SCHEMA_VERSION`; when extraction logic changes, bump `SCRAPER_VERSION` (both in `scraper/models.py`).
+- [ ] Report data problems as `extraction.warnings` codes rather than raising or silently dropping values.
 
 ## Testing rules
 
@@ -124,7 +128,7 @@ Run the complete suite with:
 pytest
 ```
 
-All current tests are offline. Scraper extraction tests use local HTML fixtures, and pipeline tests inject fake crawler and classifier implementations. Classifier client tests use `httpx.MockTransport`; they do not contact Ollama.
+All current tests are offline. `scraper/tests/test_regression_kosik.py` pins expected values for six real rendered pages in `scraper/fixtures/kosik_*.html`, including the Multikup shelf-price regression, dated discounts, "Dorovnaná cena", and an empty `warnings` list. Pipeline and CLI tests inject fake crawler and classifier implementations and write to `tmp_path`. When a Kosik markup change breaks extraction, add the new rendered page as a fixture with pinned expectations; review it for sensitive data first. Classifier client tests use `httpx.MockTransport`; they do not contact Ollama.
 
 A live manual test is appropriate only when changing browser rendering, Kosik selectors, or real Ollama integration, and only after the offline tests pass. Keep live scraping sequential, publicly accessible, respectful, and rate-limited by `SCRAPER_REQUEST_DELAY_SECONDS`. Do not present a live scrape or Ollama result as tested unless it was actually run.
 
@@ -174,7 +178,9 @@ A live manual test is appropriate only when changing browser rendering, Kosik se
 ## Current limitations
 
 - Only Kosik is implemented.
-- The JSON output is not yet the final meat-product schema.
+- Output schema 0.2 is file-based (JSONL); the database schema is being designed separately from `docs/output-format.md`.
+- A failing URL stops the run; records already written are kept, but there is no per-URL retry or skip yet.
+- `run_id` numbering assumes runs into the same file are sequential, not concurrent.
 - Classification uses broad food categories, not the future domain taxonomy.
 - There is no database persistence, scheduler, frontend, prediction model, cross-retailer product matching, or production deployment.
 

@@ -1,12 +1,13 @@
 # parky-scraper
 
-Scrapes publicly accessible, JavaScript-rendered grocery product pages from kosik.sk with Crawl4AI and optionally classifies product names with the existing Qwen/Ollama integration.
+Scrapes publicly accessible, JavaScript-rendered grocery product pages from kosik.sk with Crawl4AI and writes one JSONL record per product: static product data plus one price observation. It can optionally classify products with the Qwen/Ollama integration, using Kosik's own category breadcrumb.
 
 ## What is included
 
-- `scraper`: renders Kosik product pages, extracts typed product data, and writes JSON.
-- `qwen_classifier`: classifies product names through an Ollama-compatible `/api/generate` endpoint.
-- `scraper/tests` and `qwen_classifier/tests`: offline tests using local fixtures and mocked HTTP clients.
+- `scraper`: renders Kosik product pages and extracts typed observations (schema 0.2). JSON-LD is the primary data source, with rendered HTML as a flagged fallback. Results are appended to daily JSONL files.
+- `qwen_classifier`: classifies products through an Ollama-compatible `/api/generate` endpoint.
+- `scraper/tests` and `qwen_classifier/tests`: offline tests using rendered-page fixtures and mocked HTTP clients.
+- `docs/output-format.md`: field-by-field description of the output, written as the basis for the database schema.
 
 ## Installation
 
@@ -44,46 +45,83 @@ OLLAMA_MODEL=qwen3:30b
 
 ```bash
 python -m scraper.cli \
-  --url "https://www.kosik.sk/p39112-citrony" \
-  --url "https://www.kosik.sk/p1952-mccain-golden-longs-hranolky" \
+  --url "https://www.kosik.sk/p7004-nord-svit-zlate-parky-93-maesa" \
   --url "https://www.kosik.sk/p6902-tauris-zipser-parky-71-maesa" \
-  --output output/products.json \
+  --source-listing-url "https://www.kosik.sk/c3350-parky" \
   --classify
 ```
 
-`--url` can be repeated. `--classify` is optional and requires the Ollama configuration. The final array is written to the requested path, while the raw, unclassified array is written beside it with `.raw` inserted before the extension. For example, `output/products.json` produces `output/products.raw.json`. Parent directories are created automatically. The CLI prints only a count and output path.
+- `--url` can be repeated. URLs are scraped sequentially and rate-limited by `SCRAPER_REQUEST_DELAY_SECONDS`.
+- By default, records are **appended** to `output/kosik/<YYYY-MM-DD>/observations.jsonl`, where the date is the UTC date at the start of the run. `--output <path>` appends to a custom JSONL file instead.
+- Each run gets a `run_id` such as `2026-11-14-kosik-01`. The number continues from the highest run id already in the target file.
+- `--source-listing-url` (optional) records the category page the URLs came from.
+- `--classify` (optional) adds a `classification` object and requires the Ollama configuration.
+- Records are written one by one as they are scraped, so a failure keeps everything scraped before it. The CLI prints the run id, the count and the output path.
 
-Example product output:
+Programmatic batches, for example from the category crawler, use the same pipeline:
+
+```python
+from scraper.output import JsonlWriter
+from scraper.pipeline import ScrapingPipeline
+
+pipeline = ScrapingPipeline(run_id="2026-11-14-kosik-01")
+with JsonlWriter(path) as writer:
+    await pipeline.scrape_many(urls, source_listing_url=listing_url, on_result=writer.write)
+```
+
+## Output format
+
+One line per product. A shortened example:
 
 ```json
-[
-  {
-    "retailer": "Kosik",
-    "url": "https://www.kosik.sk/product/example",
-    "scraped_at": "2026-10-20T00:00:00Z",
-    "raw_title": "K-Classic Mlieko plnotucne 1 l",
-    "price": 0.89,
-    "regular_price": 1.09,
-    "price_per_unit": 0.89,
-    "unit": "l",
-    "weight_or_volume": "1 l",
-    "is_discounted": true,
-    "availability": "Na sklade",
-    "category": "mliecne_vyrobky",
-    "subcategory": "mlieko",
-    "confidence": 0.9,
-    "needs_review": false
-  }
-]
+{
+  "schema_version": "0.2",
+  "run_id": "2026-11-14-kosik-01",
+  "scraped_at": "2026-11-14T08:12:44Z",
+  "retailer": "kosik",
+  "retailer_product_id": "7004",
+  "url": "https://www.kosik.sk/p7004-nord-svit-zlate-parky-93-maesa",
+  "name": "Nord Svit Zlaté párky (93% mäsa)",
+  "package": {"raw": "250 g", "amount": 250, "unit": "g", "base_quantity": 0.25, "base_unit": "kg"},
+  "retailer_category_path": ["Údeniny a lahôdky", "Párky, klobásy, špekáčiky", "Párky"],
+  "shelf_price": 3.39,
+  "unit_price": {"value": 13.56, "per": "kg", "computed": 13.56},
+  "promotions": [
+    {"type": "multibuy", "min_qty": 2, "promo_price": 2.99, "discount_pct": 11, "valid_until": null}
+  ],
+  "in_stock": true,
+  "classification": null,
+  "extraction": {"source": "json-ld+html", "scraper_version": "0.2.0", "warnings": []}
+}
 ```
+
+Key rules:
+
+- `shelf_price` is the unconditional price for one piece. Multikup tiers, crossed-out prices and "Dorovnaná cena" go into `promotions`.
+- Data-quality problems never stop extraction. They are recorded as codes in `extraction.warnings`, for example `unit_price_mismatch`, and a record needs review when that list is not empty.
+
+See [`docs/output-format.md`](docs/output-format.md) for every field, the warning codes and a suggested table split.
 
 ## Classification integration
 
-`ScrapingPipeline` accepts a classifier implementing the existing `QwenClassifier.classify()` interface. It sends the extracted `raw_title` as a one-item batch, then merges category, subcategory, confidence, and review status into the product model. This dependency is injected, so extraction and tests never call Ollama directly.
+`ScrapingPipeline` accepts a classifier implementing the `QwenClassifier` interface. It sends the product name **together with the Kosik breadcrumb** (`retailer_category_path`), and the prompt tells the model to map that breadcrumb to the broad categories rather than guess from the name. The result is stored as:
+
+```json
+"classification": {
+  "category": "masove_vyrobky",
+  "subcategory": "parky",
+  "confidence": 0.93,
+  "model": "qwen3:30b",
+  "prompt_version": "2026-11-breadcrumb-v1",
+  "classified_at": "2026-11-14T08:12:47Z"
+}
+```
+
+Confidence below `CLASSIFICATION_CONFIDENCE_THRESHOLD` adds the warning `low_classification_confidence`. The classifier is injected, so extraction and tests never call Ollama directly.
 
 ## Run the standalone classifier
 
-The classifier CLI accepts one or more product names and writes an array of validated classifications:
+The classifier CLI accepts one or more product names and writes an array of validated classifications. It does not take breadcrumbs:
 
 ```bash
 python -m qwen_classifier.cli \
@@ -96,10 +134,10 @@ python -m qwen_classifier.cli \
 
 ## Tests
 
-The test suite uses only a local HTML fixture and mocked crawler/classifier objects:
-
 ```bash
 pytest
 ```
+
+The suite runs offline. Regression tests parse six real rendered Kosik pages in `scraper/fixtures/kosik_*.html`: sausages with Multikup, lemons and fries with a dated discount, bacon with "Dorovnaná cena", and oranges. Pipeline and CLI tests use a fake crawler, and classifier tests use `httpx.MockTransport`.
 
 `python -m scraper.cli --help` and `python -m qwen_classifier.cli --help` are available without network access. Live scraping is sequential, rate-limited, and limited to public pages; it does not bypass CAPTCHA, authentication, bot protection, rate limits, or robots restrictions. Selectors may require maintenance if Kosik changes its page markup.
