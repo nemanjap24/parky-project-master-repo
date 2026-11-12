@@ -8,7 +8,8 @@ from decimal import Decimal
 from html.parser import HTMLParser
 
 from .jsonld import parse_product_json_ld
-from .models import Extraction, ScrapedProduct
+from .models import Extraction, Promotion, ScrapedProduct
+from .promotions import parse_discount_label, parse_multibuy_tiers
 
 
 class _TextParser(HTMLParser):
@@ -126,6 +127,86 @@ def _html_regular_price(fields: list[tuple[str, str]]) -> Decimal | None:
     return _decimal_price(_first_text(fields, _HTML_REGULAR_PRICE_PATTERNS))
 
 
+_DETAIL_INFO = "product-detail__info"
+_SHELF_LIFE_DAYS = re.compile(r"^(\d+)\s*(?:dní|dni|deň|den)$", re.IGNORECASE)
+
+
+def _texts_with_token(fields: list[tuple[str, str]], token: str, scope: str | None = None) -> list[str]:
+    result = []
+    for context, text in fields:
+        tokens = context.split()
+        if token in tokens and (scope is None or scope in tokens):
+            result.append(text)
+    return result
+
+
+def _texts_with_token_prefix(fields: list[tuple[str, str]], prefix: str) -> list[str]:
+    return [text for context, text in fields if any(token.startswith(prefix) for token in context.split())]
+
+
+def _value_after_label(fields: list[tuple[str, str]], label: str) -> str | None:
+    """Text that directly follows the first occurrence of ``label`` (``Label:`` / value pairs)."""
+
+    wanted = label.casefold()
+    for index, (_, text) in enumerate(fields):
+        if text.rstrip(":").strip().casefold() == wanted and index + 1 < len(fields):
+            return fields[index + 1][1]
+    return None
+
+
+def _promotions(
+    fields: list[tuple[str, str]],
+    shelf_price: Decimal | None,
+    regular_price: Decimal | None,
+    scraped_at: datetime,
+    warnings: list[str],
+) -> list[Promotion]:
+    promotions: list[Promotion] = []
+    if regular_price is not None and shelf_price is not None and regular_price > shelf_price:
+        labels = [
+            text
+            for context, text in fields
+            if _OVERLAY_PRICE in context.split() and "%" in text
+        ]
+        label = parse_discount_label(labels[0], scraped_at) if labels else None
+        if label is not None and label.date_unparsed:
+            warnings.append("unparsed_promotion")
+        pct = label.discount_pct if label else None
+        if pct is None:
+            pct = int(((1 - shelf_price / regular_price) * 100).quantize(Decimal("1")))
+        promotions.append(
+            Promotion(
+                type="discount",
+                promo_price=shelf_price,
+                discount_pct=pct,
+                valid_until=label.valid_until if label else None,
+            )
+        )
+    tier_texts = _texts_with_token(fields, "cumulative-price-step", scope=_DETAIL_INFO)
+    tiers = parse_multibuy_tiers(tier_texts)
+    if tier_texts and not tiers:
+        warnings.append("unparsed_promotion")
+    promotions.extend(
+        Promotion(type="multibuy", min_qty=tier.min_qty, promo_price=tier.promo_price, discount_pct=tier.discount_pct)
+        for tier in tiers
+    )
+    labels = {" ".join(text.split()).casefold() for text in _texts_with_token_prefix(fields, "modal-product-labels-")}
+    if "dorovnaná cena" in labels:
+        promotions.append(Promotion(type="price_match"))
+    return promotions
+
+
+def _min_shelf_life_days(fields: list[tuple[str, str]], warnings: list[str]) -> int | None:
+    raw = _value_after_label(fields, "Minimálna trvanlivosť")
+    if raw is None:
+        return None
+    match = _SHELF_LIFE_DAYS.match(" ".join(raw.split()))
+    if match is None:
+        warnings.append("unparsed_shelf_life")
+        return None
+    return int(match.group(1))
+
+
 def _html_title(page_content: str, fields: list[tuple[str, str]]) -> str | None:
     title = _first_text(
         fields,
@@ -185,17 +266,23 @@ def extract_product(page_content: str, url: str, scraped_at: datetime | None = N
         ("availability", "stock", "in-stock", "product-to-cart__to-cart"),
     )
     discounted = regular_price is not None and shelf_price is not None and regular_price > shelf_price
+    observed_at = scraped_at or datetime.now(timezone.utc)
+    promotions = _promotions(fields, shelf_price, regular_price, observed_at, warnings)
+    min_shelf_life = _min_shelf_life_days(fields, warnings)
     return ScrapedProduct(
         retailer_product_id=product_id,
         url=url,
-        scraped_at=scraped_at or datetime.now(timezone.utc),
+        scraped_at=observed_at,
         name=name,
         brand=(json_ld.brand if json_ld else None) or html_brand,
         retailer_category_id=json_ld.category_id if json_ld else None,
         retailer_category_path=json_ld.category_path if json_ld else [],
+        country_of_origin=_value_after_label(fields, "Krajina pôvodu"),
+        min_shelf_life_days=min_shelf_life,
         currency=json_ld.currency if json_ld else None,
         shelf_price=shelf_price,
         regular_price=regular_price,
+        promotions=promotions,
         in_stock=json_ld.in_stock if json_ld else None,
         extraction=Extraction(source="json-ld+html" if json_ld else "html", warnings=warnings),
         raw_title=name or "Unknown product",

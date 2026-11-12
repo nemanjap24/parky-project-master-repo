@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated, Literal
 
@@ -24,6 +24,23 @@ class Extraction(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class Promotion(BaseModel):
+    """A price condition shown next to the shelf price.
+
+    ``discount``: crossed-out regular price, ``promo_price`` equals the shelf price.
+    ``multibuy``: Multikup tier, price per piece when buying at least ``min_qty``.
+    ``price_match``: "Dorovnaná cena" label, no price of its own.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["discount", "multibuy", "price_match"]
+    min_qty: int | None = Field(default=None, ge=1)
+    promo_price: Money | None = None
+    discount_pct: int | None = Field(default=None, ge=0, le=100)
+    valid_until: date | None = None
+
+
 class ScrapedProduct(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -36,10 +53,13 @@ class ScrapedProduct(BaseModel):
     brand: str | None = None
     retailer_category_id: str | None = None
     retailer_category_path: list[str] = Field(default_factory=list)
+    country_of_origin: str | None = None
+    min_shelf_life_days: int | None = Field(default=None, ge=0)
 
     currency: str | None = None
     shelf_price: Money | None = None
     regular_price: Money | None = None
+    promotions: list[Promotion] = Field(default_factory=list)
     in_stock: bool | None = None
 
     extraction: Extraction = Field(default_factory=lambda: Extraction(source="html"))
