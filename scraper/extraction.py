@@ -8,8 +8,10 @@ from decimal import Decimal
 from html.parser import HTMLParser
 
 from .jsonld import parse_product_json_ld
-from .models import Extraction, Promotion, ScrapedProduct
+from .models import BaseUnit, Extraction, ProductObservation, Promotion, UnitPrice
+from .package import parse_package
 from .promotions import parse_discount_label, parse_multibuy_tiers
+from .validation import compute_unit_price, observation_warnings
 
 
 class _TextParser(HTMLParser):
@@ -70,11 +72,6 @@ def _first_text(fields: list[tuple[str, str]], patterns: tuple[str, ...]) -> str
     return None
 
 
-def _combined_text(fields: list[tuple[str, str]], patterns: tuple[str, ...]) -> str | None:
-    values = [text for context, text in fields if any(pattern in context for pattern in patterns)]
-    return " ".join(values) if values else None
-
-
 def _scoped_text(fields: list[tuple[str, str]], scope: str, tid: str) -> str | None:
     """First text whose ancestors include the ``scope`` token and the exact ``tid`` token."""
 
@@ -90,18 +87,6 @@ def _decimal_price(value: str | None) -> Decimal | None:
         return None
     match = re.search(r"\d+(?:[,.]\d{1,2})?", value.replace("\xa0", " "))
     return Decimal(match.group(0).replace(",", ".")) if match else None
-
-
-def _price(value: str | None) -> float | None:
-    amount = _decimal_price(value)
-    return float(amount) if amount is not None else None
-
-
-def _unit(value: str | None) -> str | None:
-    if not value:
-        return None
-    match = re.search(r"\b(kg|g|l|ml|ks)\b", value.lower())
-    return match.group(1) if match else None
 
 
 _OVERLAY_PRICE = "product-detail__overlay_price"
@@ -222,12 +207,32 @@ def _html_title(page_content: str, fields: list[tuple[str, str]]) -> str | None:
     return title or next((text for context, text in fields if context.startswith("h1 ")), None)
 
 
-def extract_product(page_content: str, url: str, scraped_at: datetime | None = None) -> ScrapedProduct:
+_UNIT_PRICE_PER = re.compile(r"€\s*/\s*(kg|l|ks)\b", re.IGNORECASE)
+_HTML_UNIT_PRICE_PATTERNS = ("pbox-price-per-unit", "price-per-unit", "unit-price", "priceperunit")
+_HTML_PACKAGE_PATTERNS = ("product-detail__product-weight", "weight", "volume", "quantity", "size")
+
+
+def _html_unit_price(fields: list[tuple[str, str]]) -> tuple[Decimal | None, BaseUnit | None]:
+    texts = _texts_with_token(fields, "pbox-price-per-unit", scope=_OVERLAY_PRICE)
+    if not texts:
+        texts = [text for context, text in fields if any(pattern in context for pattern in _HTML_UNIT_PRICE_PATTERNS)]
+    joined = " ".join(texts)
+    per = _UNIT_PRICE_PER.search(joined)
+    return _decimal_price(joined or None), per.group(1).lower() if per else None  # type: ignore[return-value]
+
+
+def _html_package_label(fields: list[tuple[str, str]]) -> str | None:
+    scoped = _texts_with_token(fields, "product-detail__product-weight", scope=_DETAIL_INFO)
+    return scoped[0] if scoped else _first_text(fields, _HTML_PACKAGE_PATTERNS)
+
+
+def extract_product(page_content: str, url: str, scraped_at: datetime | None = None) -> ProductObservation:
     """Extract one product observation from a rendered Kosik product page.
 
     JSON-LD is the primary source for identity, price, currency, stock and
     category. HTML is used for fields JSON-LD does not carry and as a flagged
-    fallback when JSON-LD is missing.
+    fallback when JSON-LD is missing. Problems are recorded as warning codes in
+    ``extraction.warnings``; extraction itself does not fail on bad data.
     """
 
     fields = _fields(page_content)
@@ -248,33 +253,40 @@ def extract_product(page_content: str, url: str, scraped_at: datetime | None = N
     if json_ld is not None and not json_ld.category_path:
         warnings.append("missing_breadcrumb")
 
-    name = (json_ld.name if json_ld else None) or _html_title(page_content, fields)
-    url_id = _URL_PRODUCT_ID.search(url)
-    product_id = (json_ld.sku if json_ld else None) or (url_id.group(1) if url_id else None)
-    html_brand = _first_text(fields, ("product-detail__main-info__info_brand",))
+    package_label = _html_package_label(fields)
+    package = parse_package(package_label)
+    if package_label is None:
+        warnings.append("missing_package")
+    elif package is None:
+        warnings.append("unparsed_package")
+
+    unit_value, unit_per = _html_unit_price(fields)
+    unit_price = None
+    if unit_value is not None or package is not None:
+        unit_price = UnitPrice(value=unit_value, per=unit_per, computed=compute_unit_price(shelf_price, package))
+
     regular_price = _html_regular_price(fields)
-    unit_price = _combined_text(
-        fields,
-        ("pbox-price-per-unit", "price-per-unit", "unit-price", "priceperunit"),
-    )
-    weight = _first_text(
-        fields,
-        ("product-detail__product-weight", "weight", "volume", "quantity", "size"),
-    )
-    availability = _first_text(
-        fields,
-        ("availability", "stock", "in-stock", "product-to-cart__to-cart"),
-    )
-    discounted = regular_price is not None and shelf_price is not None and regular_price > shelf_price
     observed_at = scraped_at or datetime.now(timezone.utc)
     promotions = _promotions(fields, shelf_price, regular_price, observed_at, warnings)
     min_shelf_life = _min_shelf_life_days(fields, warnings)
-    return ScrapedProduct(
-        retailer_product_id=product_id,
-        url=url,
+    warnings.extend(
+        observation_warnings(
+            shelf_price=shelf_price,
+            regular_price=regular_price,
+            package=package,
+            unit_price=unit_price,
+        )
+    )
+
+    url_id = _URL_PRODUCT_ID.search(url)
+    html_brand = _first_text(fields, ("product-detail__main-info__info_brand",))
+    return ProductObservation(
         scraped_at=observed_at,
-        name=name,
+        retailer_product_id=(json_ld.sku if json_ld else None) or (url_id.group(1) if url_id else None),
+        url=url,
+        name=(json_ld.name if json_ld else None) or _html_title(page_content, fields),
         brand=(json_ld.brand if json_ld else None) or html_brand,
+        package=package,
         retailer_category_id=json_ld.category_id if json_ld else None,
         retailer_category_path=json_ld.category_path if json_ld else [],
         country_of_origin=_value_after_label(fields, "Krajina pôvodu"),
@@ -282,15 +294,8 @@ def extract_product(page_content: str, url: str, scraped_at: datetime | None = N
         currency=json_ld.currency if json_ld else None,
         shelf_price=shelf_price,
         regular_price=regular_price,
+        unit_price=unit_price,
         promotions=promotions,
         in_stock=json_ld.in_stock if json_ld else None,
         extraction=Extraction(source="json-ld+html" if json_ld else "html", warnings=warnings),
-        raw_title=name or "Unknown product",
-        price=float(shelf_price) if shelf_price is not None else None,
-        price_per_unit=_price(unit_price),
-        unit=_unit(unit_price) or _unit(weight),
-        weight_or_volume=weight,
-        is_discounted=discounted,
-        availability=availability,
     )
-
