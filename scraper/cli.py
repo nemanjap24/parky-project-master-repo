@@ -16,7 +16,18 @@ from .pipeline import ScrapingPipeline
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Scrape public Kosik product pages into JSONL observations")
-    parser.add_argument("--url", action="append", required=True, help="Kosik product URL; may be repeated")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--url", action="append", help="Kosik product URL; may be repeated")
+    source.add_argument(
+        "--all-products",
+        action="store_true",
+        help="Discover product URLs from Kosik's public product sitemap",
+    )
+    source.add_argument(
+        "--category-products",
+        action="store_true",
+        help="Discover products from the category whitelist in scraper/crawler.py",
+    )
     parser.add_argument(
         "--output",
         type=Path,
@@ -51,9 +62,15 @@ async def run(
         pipeline = ScrapingPipeline(classifier=classifier, settings=get_scraper_settings())
     pipeline.run_id = run_id
     try:
+        if args.category_products:
+            urls = await pipeline.crawler.discover_category_product_urls()
+        elif args.all_products:
+            urls = await pipeline.crawler.discover_product_urls()
+        else:
+            urls = args.url or []
         with JsonlWriter(output) as writer:
             await pipeline.scrape_many(
-                args.url,
+                urls,
                 classify=args.classify,
                 source_listing_url=args.source_listing_url,
                 on_result=writer.write,

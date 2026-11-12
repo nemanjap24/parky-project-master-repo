@@ -57,6 +57,7 @@ python -m scraper.cli \
 - `--source-listing-url` (optional) records the category page the URLs came from.
 - `--classify` (optional) adds a `classification` object and requires the Ollama configuration.
 - Records are written one by one as they are scraped, so a failure keeps everything scraped before it. The CLI prints the run id, the count and the output path.
+- Instead of `--url`, `--category-products` discovers product URLs from the whitelisted Kosik categories, and `--all-products` discovers them from the public product sitemap. Use exactly one of `--url`, `--category-products`, or `--all-products`.
 
 Programmatic batches, for example from the category crawler, use the same pipeline:
 
