@@ -113,3 +113,112 @@ def test_records_before_a_failure_are_kept(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="boom"):
         asyncio.run(run(args, pipeline=_pipeline(FixtureCrawler(fail_on=TAURIS)), now=NOW))
     assert [r.retailer_product_id for r in read_observations(output)] == ["7004"]
+
+
+SLANINA = "https://www.kosik.sk/p7224-fine-life-anglicka-slanina-platky-94-maeso"
+FIXTURE_BY_URL[SLANINA] = "kosik_fine_life_slanina.html"
+PARKY_LISTING = "https://www.kosik.sk/c3350-parky"
+SLANINY_LISTING = "https://www.kosik.sk/c3365-slaniny"
+
+
+class DiscoveringCrawler(FixtureCrawler):
+    async def discover_category_listings(self, categories):  # type: ignore[no-untyped-def]
+        from scraper.discovery import CategoryListing, DiscoveryManifest
+
+        listings = {
+            "c3350": CategoryListing(
+                category_id="c3350",
+                category_name="Párky",
+                url=PARKY_LISTING,
+                product_urls=[NORD_SVIT, TAURIS, SLANINA],
+                load_more_clicks=0,
+                complete=True,
+            ),
+            "c3365": CategoryListing(
+                category_id="c3365",
+                category_name="Slaniny",
+                url=SLANINY_LISTING,
+                product_urls=[SLANINA, NORD_SVIT],
+                load_more_clicks=31,
+                complete=False,
+            ),
+        }
+        return DiscoveryManifest(
+            discovered_at=NOW,
+            listings=[listings[c.id] for c in categories if c.id in listings],
+        )
+
+
+def _whitelist(tmp_path: Path) -> Path:
+    path = tmp_path / "categories.json"
+    path.write_text(
+        json.dumps(
+            {
+                "categories": [
+                    {"id": "c3350", "name": "Párky", "day": "fri"},
+                    {"id": "c3365", "name": "Slaniny", "day": "sat"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_category_mode_writes_manifest_and_tags_listing(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    output = tmp_path / "obs.jsonl"
+    argv = ["--category-products", "--categories-config", str(_whitelist(tmp_path)), "--output", str(output)]
+
+    _, run_id, count = asyncio.run(run(parse_args(argv), pipeline=_pipeline(DiscoveringCrawler()), now=NOW))
+
+    assert count == 3  # Nord Svit and slanina appear in both listings but are scraped once
+    records = read_observations(output)
+    assert [(r.retailer_product_id, r.source_listing_url) for r in records] == [
+        ("7004", PARKY_LISTING),
+        ("6902", PARKY_LISTING),
+        ("7224", PARKY_LISTING),
+    ]
+    assert records[0].extraction.warnings == []
+    assert records[2].extraction.warnings == ["outside_listing_category"]
+    manifest_path = tmp_path / f"discovery-{run_id}.json"
+    from scraper.discovery import read_manifest
+
+    assert read_manifest(manifest_path).run_id == run_id
+    assert "WARNING: list may be incomplete" in capsys.readouterr().out
+
+
+def test_day_selects_categories_and_resume_skips_existing(tmp_path: Path) -> None:
+    output = tmp_path / "obs.jsonl"
+    whitelist = _whitelist(tmp_path)
+    friday = ["--category-products", "--day", "fri", "--categories-config", str(whitelist), "--output", str(output)]
+    _, first_run, _ = asyncio.run(run(parse_args(friday), pipeline=_pipeline(DiscoveringCrawler()), now=NOW))
+    manifest_path = tmp_path / f"discovery-{first_run}.json"
+
+    resume = ["--from-manifest", str(manifest_path), "--skip-existing", "--output", str(output)]
+    _, _, resumed = asyncio.run(run(parse_args(resume), pipeline=_pipeline(DiscoveringCrawler()), now=NOW))
+
+    assert resumed == 0
+    assert len(read_observations(output)) == 3
+
+
+def test_resume_after_failure_scrapes_only_missing_products(tmp_path: Path) -> None:
+    output = tmp_path / "obs.jsonl"
+    argv = ["--category-products", "--day", "fri", "--categories-config", str(_whitelist(tmp_path)), "--output", str(output)]
+    with pytest.raises(RuntimeError, match="boom"):
+        asyncio.run(run(parse_args(argv), pipeline=_pipeline(DiscoveringCrawler(fail_on=TAURIS)), now=NOW))
+    manifest_path = next(tmp_path.glob("discovery-*.json"))
+
+    resume = ["--from-manifest", str(manifest_path), "--skip-existing", "--output", str(output)]
+    _, _, resumed = asyncio.run(run(parse_args(resume), pipeline=_pipeline(DiscoveringCrawler()), now=NOW))
+
+    assert resumed == 2
+    assert sorted(r.retailer_product_id for r in read_observations(output)) == ["6902", "7004", "7224"]
+
+
+def test_invalid_option_combinations_are_rejected() -> None:
+    with pytest.raises(SystemExit):
+        parse_args(["--category-products", "--source-listing-url", PARKY_LISTING])
+    with pytest.raises(SystemExit):
+        parse_args(["--url", NORD_SVIT, "--day", "fri"])
+    with pytest.raises(SystemExit):
+        parse_args(["--url", NORD_SVIT, "--category-products"])

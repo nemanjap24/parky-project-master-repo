@@ -10,7 +10,8 @@ The current repository deliberately covers only an early slice of that goal: scr
 
 | Path | Responsibility and main entry points |
 | --- | --- |
-| `scraper/` | Kosik scraping package. `crawler.py` contains `KosikCrawler`; `extraction.py` contains `extract_product`; `jsonld.py` parses schema.org JSON-LD; `promotions.py` parses Multikup tiers and discount labels; `package.py` normalizes package sizes; `validation.py` computes unit prices and warning codes; `models.py` defines `ProductObservation` and its nested models; `pipeline.py` coordinates scraping and optional classification; `output.py` writes JSONL and assigns run ids; `config.py` reads scraper settings; `cli.py` is run with `python -m scraper.cli`. `fixtures/kosik_*.html` are six real rendered Kosik pages used by regression tests; `tests/` covers parsing, models, validation, pipeline, and output. |
+| `scraper/` | Kosik scraping package. `crawler.py` contains `KosikCrawler` (page rendering plus sitemap and category-page URL discovery); `discovery.py` defines the category whitelist and the discovery manifest; `extraction.py` contains `extract_product`; `jsonld.py` parses schema.org JSON-LD; `promotions.py` parses Multikup tiers and discount labels; `package.py` normalizes package sizes; `validation.py` computes unit prices and warning codes; `models.py` defines `ProductObservation` and its nested models; `pipeline.py` coordinates scraping and optional classification; `output.py` writes JSONL and assigns run ids; `config.py` reads scraper settings; `cli.py` is run with `python -m scraper.cli`. `fixtures/kosik_*.html` are six real rendered Kosik pages used by regression tests; `tests/` covers parsing, models, validation, pipeline, and output. |
+| `config/kosik_categories.json` | Whitelist of Kosik categories to collect, by category id (`c3365`), with an optional weekend day (`fri`, `sat`, `sun`). Validated by `CategoryWhitelist`. |
 | `qwen_classifier/` | Qwen/Ollama classification package. `client.py` contains `QwenClassifier`; `prompts.py` builds the constrained classification prompt; `models.py` defines Pydantic response contracts; `config.py` reads Ollama settings; `cli.py` is run with `python -m qwen_classifier.cli`. Its `tests/` validate prompts, models, and mocked HTTP behavior. |
 | `README.md` | User-facing setup, configuration, usage, architecture summary, and test documentation. |
 | `docs/output-format.md` | Field-by-field description of the JSONL output and warning codes; the basis for the future database schema. Keep it in sync with `scraper/models.py`. |
@@ -23,10 +24,20 @@ The current repository deliberately covers only an early slice of that goal: scr
 ## Current architecture
 
 ```text
-URL produktu (+ source_listing_url)
+config/kosik_categories.json (category ids, day)
    |
    v
-KosikCrawler (rendered HTML)
+KosikCrawler.discover_category_listings
+   |-- sitemap.xml -> categories.xml (find category URL by id)
+   |-- render category page, click "Načítať ďalšie", collect /p… links
+   v
+DiscoveryManifest -> discovery-<run_id>.json (per category: URL, product URLs, complete?)
+   |
+   v  per category: scrape_many(urls, source_listing_url=category URL)
+URL produktu
+   |
+   v
+KosikCrawler.crawl (rendered HTML)
    |
    v
 extract_product
@@ -43,6 +54,8 @@ JsonlWriter -> output/kosik/<YYYY-MM-DD>/observations.jsonl (append, 1 line = 1 
 ```
 
 `KosikCrawler` accepts only public `kosik.sk` URLs, applies the configured request delay, and renders the page with headless Crawl4AI/Playwright. Those browser components are required because the product content is JavaScript-rendered; the crawler waits for the populated Kosik application before returning HTML.
+
+URL discovery is part of `KosikCrawler`. `discover_category_listings(categories)` reads `sitemap.xml` and `categories.xml` with `httpx`, finds the whitelisted categories by id, renders each category page with a load-more script, and returns a `DiscoveryManifest` grouped by category. Sitemap requests use the same request delay as page renders. The CLI saves the manifest before scraping, scrapes each category as one `scrape_many` batch with `source_listing_url`, scrapes duplicates only once, and can resume with `--from-manifest` and `--skip-existing`. `discover_product_urls()` (`--all-products`) covers the whole product sitemap and is for debugging only.
 
 `extract_product` deterministically turns a rendered page into a `ProductObservation`. JSON-LD (`Product`, `Offer` referenced by `@id`, `BreadcrumbList`) is the primary source for identity, `shelf_price`, currency, `in_stock`, and the Kosik category. HTML provides the package size, unit price, crossed-out price, promotions (`discount`, `multibuy`, `price_match`), country of origin, and minimum shelf life, and serves as a fallback. `shelf_price` is the unconditional one-piece price and must never come from Multikup tiers. Problems never raise: they are appended as codes to `extraction.warnings`, and `needs_review` is derived from that list. Prices are `Decimal` and serialized as JSON numbers. `docs/output-format.md` lists every field and warning code.
 
@@ -64,7 +77,21 @@ pytest
 
 For live Crawl4AI scraping, install the browser dependencies required by the installed Crawl4AI release before running a scrape.
 
-Scrape without classification (appends to `output/kosik/<YYYY-MM-DD>/observations.jsonl`):
+Collect Friday's whitelisted categories with classification:
+
+```bash
+python -m scraper.cli --category-products --day fri --classify
+```
+
+Resume an interrupted run from its discovery manifest:
+
+```bash
+python -m scraper.cli \
+  --from-manifest output/kosik/2026-11-14/discovery-2026-11-14-kosik-01.json \
+  --skip-existing
+```
+
+Scrape individual URLs without classification (appends to `output/kosik/<YYYY-MM-DD>/observations.jsonl`):
 
 ```bash
 python -m scraper.cli \
@@ -176,6 +203,9 @@ A live manual test is appropriate only when changing browser rendering, Kosik se
 - Evaluate prediction accuracy and economic impact, and document limitations.
 
 ## Current limitations
+
+- The category whitelist currently holds only example categories; the team still has to fill in the ~16 subcategories and their days.
+- Category discovery depends on clicking "Načítať ďalšie" (at most 30 clicks). The result is reported through a `data-parky-load-more` marker on `<body>`; a listing is marked `complete: false` when the limit is hit or the marker is missing. Whether Kosik offers URL-based pagination has not been checked.
 
 - Only Kosik is implemented.
 - Output schema 0.2 is file-based (JSONL); the database schema is being designed separately from `docs/output-format.md`.

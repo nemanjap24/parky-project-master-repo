@@ -10,8 +10,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import get_scraper_settings
-from .output import JsonlWriter, default_output_path, next_run_id
+from .discovery import (
+    DEFAULT_CATEGORIES_CONFIG,
+    DiscoveryManifest,
+    load_category_whitelist,
+    read_manifest,
+    write_manifest,
+)
+from .output import JsonlWriter, default_output_path, next_run_id, read_observations
 from .pipeline import ScrapingPipeline
+
+# (source listing URL or None, product URLs) — one scrape_many call per batch.
+Batch = tuple[str | None, list[str]]
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -19,14 +29,19 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--url", action="append", help="Kosik product URL; may be repeated")
     source.add_argument(
-        "--all-products",
-        action="store_true",
-        help="Discover product URLs from Kosik's public product sitemap",
-    )
-    source.add_argument(
         "--category-products",
         action="store_true",
-        help="Discover products from the category whitelist in scraper/crawler.py",
+        help="Discover products on the whitelisted categories (see --categories-config and --day)",
+    )
+    source.add_argument(
+        "--from-manifest",
+        type=Path,
+        help="Scrape the product URLs of a saved discovery manifest (resume a run)",
+    )
+    source.add_argument(
+        "--all-products",
+        action="store_true",
+        help="Debugging only: every product in Kosik's product sitemap, without category information",
     )
     parser.add_argument(
         "--output",
@@ -34,9 +49,69 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=None,
         help="JSONL file to append to (default: output/kosik/<YYYY-MM-DD>/observations.jsonl)",
     )
-    parser.add_argument("--source-listing-url", default=None, help="Category page the URLs were collected from")
+    parser.add_argument(
+        "--source-listing-url",
+        default=None,
+        help="With --url: category page the URLs were collected from",
+    )
+    parser.add_argument(
+        "--categories-config",
+        type=Path,
+        default=DEFAULT_CATEGORIES_CONFIG,
+        help=f"Category whitelist JSON (default: {DEFAULT_CATEGORIES_CONFIG})",
+    )
+    parser.add_argument(
+        "--day",
+        choices=["fri", "sat", "sun"],
+        default=None,
+        help="With --category-products: only categories planned for this day",
+    )
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Skip product URLs that already have a record in the output file",
+    )
     parser.add_argument("--classify", action="store_true", help="Classify products with Qwen")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.source_listing_url and not args.url:
+        parser.error("--source-listing-url can only be used with --url")
+    if args.day and not args.category_products:
+        parser.error("--day can only be used with --category-products")
+    return args
+
+
+def manifest_path_for(output: Path, run_id: str) -> Path:
+    return output.with_name(f"discovery-{run_id}.json")
+
+
+def _report(manifest: DiscoveryManifest, manifest_path: Path | None) -> None:
+    saved = f"; saved {manifest_path}" if manifest_path else ""
+    print(f"{manifest.product_count} product URL(s) in {len(manifest.listings)} categories{saved}")
+    for listing in manifest.listings:
+        note = "" if listing.complete else "  WARNING: list may be incomplete (load-more limit or unknown state)"
+        print(f"  {listing.category_id} {listing.category_name}: {len(listing.product_urls)}{note}")
+    if manifest.missing_category_ids:
+        print(f"  WARNING: not in Kosik's categories sitemap: {', '.join(manifest.missing_category_ids)}")
+
+
+async def _batches(args: argparse.Namespace, pipeline: ScrapingPipeline, output: Path, run_id: str) -> list[Batch]:
+    if args.url:
+        return [(args.source_listing_url, args.url)]
+    if args.all_products:
+        return [(None, await pipeline.crawler.discover_product_urls())]
+    if args.from_manifest:
+        manifest = read_manifest(args.from_manifest)
+        _report(manifest, None)
+    else:
+        categories = load_category_whitelist(args.categories_config).for_day(args.day)
+        if not categories:
+            raise ValueError(f"No categories in {args.categories_config} for day {args.day!r}")
+        manifest = await pipeline.crawler.discover_category_listings(categories)
+        manifest = manifest.model_copy(update={"run_id": run_id})
+        manifest_path = manifest_path_for(output, run_id)
+        write_manifest(manifest, manifest_path)
+        _report(manifest, manifest_path)
+    return [(listing.url, listing.product_urls) for listing in manifest.listings]
 
 
 async def run(
@@ -44,8 +119,9 @@ async def run(
     pipeline: ScrapingPipeline | None = None,
     now: datetime | None = None,
 ) -> tuple[Path, str, int]:
-    """Scrape ``args.url`` and append one JSONL line per product.
+    """Discover (if requested) and scrape products, appending one JSONL line per product.
 
+    Products found in several categories are scraped once, under the first one.
     Returns the output path, the run id and the number of written records.
     ``pipeline`` and ``now`` are injectable for offline tests.
     """
@@ -62,19 +138,20 @@ async def run(
         pipeline = ScrapingPipeline(classifier=classifier, settings=get_scraper_settings())
     pipeline.run_id = run_id
     try:
-        if args.category_products:
-            urls = await pipeline.crawler.discover_category_product_urls()
-        elif args.all_products:
-            urls = await pipeline.crawler.discover_product_urls()
-        else:
-            urls = args.url or []
+        batches = await _batches(args, pipeline, output, run_id)
+        seen: set[str] = set()
+        if args.skip_existing and output.exists():
+            seen = {record.url for record in read_observations(output)}
         with JsonlWriter(output) as writer:
-            await pipeline.scrape_many(
-                urls,
-                classify=args.classify,
-                source_listing_url=args.source_listing_url,
-                on_result=writer.write,
-            )
+            for source_listing_url, product_urls in batches:
+                urls = [url for url in dict.fromkeys(product_urls) if url not in seen]
+                seen.update(urls)
+                await pipeline.scrape_many(
+                    urls,
+                    classify=args.classify,
+                    source_listing_url=source_listing_url,
+                    on_result=writer.write,
+                )
             return output, run_id, writer.count
     finally:
         if classifier is not None:

@@ -289,6 +289,7 @@ def extract_product(page_content: str, url: str, scraped_at: datetime | None = N
         package=package,
         retailer_category_id=json_ld.category_id if json_ld else None,
         retailer_category_path=json_ld.category_path if json_ld else [],
+        retailer_category_ids=json_ld.category_ids if json_ld else [],
         country_of_origin=_value_after_label(fields, "Krajina pôvodu"),
         min_shelf_life_days=min_shelf_life,
         currency=json_ld.currency if json_ld else None,

@@ -195,6 +195,8 @@ def test_identity_and_category_come_from_json_ld(case: Expected) -> None:
     assert product.brand == case.brand
     assert product.retailer_category_id == case.category_id
     assert product.retailer_category_path == list(case.category_path)
+    assert len(product.retailer_category_ids) == len(case.category_path)
+    assert product.retailer_category_ids[-1] == case.category_id
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case.fixture)

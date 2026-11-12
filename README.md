@@ -43,6 +43,33 @@ OLLAMA_MODEL=qwen3:30b
 
 ## Run the scraper
 
+### Weekend collection from whitelisted categories
+
+The categories to collect are listed in [`config/kosik_categories.json`](config/kosik_categories.json) by their stable Kosik id (`c3365`), with the weekend day they belong to:
+
+```json
+{"categories": [{"id": "c3365", "name": "Slaniny", "day": "fri"}]}
+```
+
+```bash
+python -m scraper.cli --category-products --day fri --classify
+```
+
+1. The crawler reads Kosik's public `sitemap.xml` and `categories.xml` and finds each whitelisted category **by id**, so a renamed URL slug does not drop it. Ids that are missing from the sitemap are reported.
+2. It renders each category page, clicks "Načítať ďalšie" up to 30 times, and collects the product links. A category whose list may be truncated (click limit reached, or the loading state is unknown) is reported as **incomplete**.
+3. The URLs are saved per category to `discovery-<run_id>.json` next to the output file before any product is scraped.
+4. Products are scraped category by category with `source_listing_url` set. A product listed in several categories is scraped once, under the first one. If a product's own breadcrumb is not under the listing category (for example a recommended product), the record gets the warning `outside_listing_category`.
+
+To resume an interrupted run without discovering again, scraping only the products that are still missing:
+
+```bash
+python -m scraper.cli --from-manifest output/kosik/2026-11-14/discovery-2026-11-14-kosik-01.json --skip-existing
+```
+
+`--all-products` lists every product in Kosik's product sitemap, without category information. It is meant for debugging only, because it covers the whole shop.
+
+### Individual product URLs
+
 ```bash
 python -m scraper.cli \
   --url "https://www.kosik.sk/p7004-nord-svit-zlate-parky-93-maesa" \
@@ -54,12 +81,13 @@ python -m scraper.cli \
 - `--url` can be repeated. URLs are scraped sequentially and rate-limited by `SCRAPER_REQUEST_DELAY_SECONDS`.
 - By default, records are **appended** to `output/kosik/<YYYY-MM-DD>/observations.jsonl`, where the date is the UTC date at the start of the run. `--output <path>` appends to a custom JSONL file instead.
 - Each run gets a `run_id` such as `2026-11-14-kosik-01`. The number continues from the highest run id already in the target file.
-- `--source-listing-url` (optional) records the category page the URLs came from.
+- `--source-listing-url` (optional, only with `--url`) records the category page the URLs came from.
 - `--classify` (optional) adds a `classification` object and requires the Ollama configuration.
 - Records are written one by one as they are scraped, so a failure keeps everything scraped before it. The CLI prints the run id, the count and the output path.
-- Instead of `--url`, `--category-products` discovers product URLs from the whitelisted Kosik categories, and `--all-products` discovers them from the public product sitemap. Use exactly one of `--url`, `--category-products`, or `--all-products`.
+- `--skip-existing` skips product URLs that already have a record in the output file.
+- Use exactly one source: `--url`, `--category-products`, `--from-manifest`, or `--all-products`.
 
-Programmatic batches, for example from the category crawler, use the same pipeline:
+Programmatic batches use the same pipeline:
 
 ```python
 from scraper.output import JsonlWriter

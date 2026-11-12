@@ -10,6 +10,7 @@ from qwen_classifier.models import ClassificationInput, ProductClassification
 
 from .config import ScraperSettings, get_scraper_settings
 from .crawler import KosikCrawler
+from .discovery import category_id_from_url
 from .extraction import extract_product
 from .models import Classification, ProductObservation
 
@@ -55,10 +56,25 @@ class ScrapingPipeline:
     ) -> ProductObservation:
         product = extract_product(await self.crawler.crawl(url), url, scraped_at=self.clock())
         product = product.model_copy(update={"run_id": self.run_id, "source_listing_url": source_listing_url})
+        product = self._check_listing_category(product)
         enabled = self.settings.classification_enabled if classify is None else classify
         if not enabled:
             return product
         return self.classify_product(product)
+
+    @staticmethod
+    def _check_listing_category(product: ProductObservation) -> ProductObservation:
+        """Flag products whose breadcrumb is not under the listing they were found on.
+
+        Category pages also show recommended products from other categories; the
+        product's own breadcrumb tells whether it really belongs to the listing.
+        """
+
+        listing_id = category_id_from_url(product.source_listing_url)
+        if listing_id is None or not product.retailer_category_ids or listing_id in product.retailer_category_ids:
+            return product
+        warnings = [*product.extraction.warnings, "outside_listing_category"]
+        return product.model_copy(update={"extraction": product.extraction.model_copy(update={"warnings": warnings})})
 
     def classify_product(self, product: ProductObservation) -> ProductObservation:
         """Attach a classification based on the retailer breadcrumb (and name).

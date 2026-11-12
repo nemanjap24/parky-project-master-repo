@@ -96,3 +96,14 @@ def test_scrape_many_keeps_order() -> None:
     urls = [URL, URL + "?again"]
     products = asyncio.run(_pipeline(FakeClassifier(), enabled=False).scrape_many(urls))
     assert [product.url for product in products] == urls
+
+
+def test_product_outside_listing_category_is_flagged() -> None:
+    pipeline = _pipeline(FakeClassifier(), enabled=False)
+    inside = asyncio.run(pipeline.scrape(URL, source_listing_url="https://www.kosik.sk/c2968-citrusy"))
+    outside = asyncio.run(pipeline.scrape(URL, source_listing_url="https://www.kosik.sk/c3350-parky"))
+    unknown = asyncio.run(pipeline.scrape(URL, source_listing_url=None))
+    assert inside.retailer_category_ids == ["c2894", "c2964", "c2968", "c2969"]
+    assert inside.extraction.warnings == []
+    assert outside.extraction.warnings == ["outside_listing_category"]
+    assert unknown.extraction.warnings == []

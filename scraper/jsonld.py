@@ -48,11 +48,18 @@ class JsonLdProduct(BaseModel):
         return None
 
     @property
+    def category_ids(self) -> list[str | None]:
+        """Category id of each breadcrumb entry (aligned with ``category_path``)."""
+
+        ids: list[str | None] = []
+        for url in self.category_urls:
+            match = _CATEGORY_ID.search(url)
+            ids.append(match.group(1) if match else None)
+        return ids
+
+    @property
     def category_id(self) -> str | None:
-        if not self.category_urls:
-            return None
-        match = _CATEGORY_ID.search(self.category_urls[-1])
-        return match.group(1) if match else None
+        return self.category_ids[-1] if self.category_ids else None
 
 
 def _nodes(html: str) -> list[dict[str, Any]]:

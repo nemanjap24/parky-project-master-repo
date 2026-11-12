@@ -73,7 +73,7 @@ Columns: **Group** tells you whether the field belongs to a *run*, the *product*
 | `scraped_at` | datetime (UTC) | no | observation | When this page was rendered and parsed. |
 | `retailer` | enum `"kosik"` | no | product | Retailer code, lowercase. |
 | `url` | string | no | product | Product page URL as requested. |
-| `source_listing_url` | string | yes | observation | Category/listing page the URL came from, when the caller provides it (crawler batches, `--source-listing-url`). |
+| `source_listing_url` | string | yes | observation | Category/listing page the URL came from: set automatically in category mode, or by `--source-listing-url`. If the product's breadcrumb is not under this category, the warning `outside_listing_category` is added. |
 
 ### Product (static data)
 
@@ -85,6 +85,7 @@ Columns: **Group** tells you whether the field belongs to a *run*, the *product*
 | `package` | object | yes | Normalized package size, see [`package`](#package). `null` when the label is missing or not understood (a warning is added). |
 | `retailer_category_id` | string | yes | Kosik category id of the most specific breadcrumb entry, taken from its URL (`/c3350-parky` → `"c3350"`). |
 | `retailer_category_path` | string[] | no | Kosik breadcrumb names from root to leaf, without the product itself. `[]` when unavailable. |
+| `retailer_category_ids` | (string or null)[] | no | Category id of each breadcrumb entry, aligned with `retailer_category_path` (`["c3338", "c3349", "c3350"]`). `null` for an entry without a category URL. Use it for the category hierarchy. |
 | `country_of_origin` | string | yes | The "Krajina pôvodu" value exactly as shown (`"Slovensko"`, `"Európska únia"`). Not normalized to ISO codes. |
 | `min_shelf_life_days` | integer ≥ 0 | yes | The "Minimálna trvanlivosť" value in days. `null` when not shown. Values that are not in days (weeks, months) are left `null` with the warning `unparsed_shelf_life`. |
 
@@ -169,15 +170,29 @@ The LLM receives the product name **and `retailer_category_path`**. It is instru
 | `regular_price_not_higher` | `regular_price` exists but is not higher than `shelf_price`. |
 | `unit_price_mismatch` | `abs(value - computed) / computed > 0.02`. |
 | `unit_price_unit_mismatch` | `unit_price.per` differs from `package.base_unit`, so the two cannot be compared. |
+| `outside_listing_category` | The listing category (`source_listing_url`) is not in the product's `retailer_category_ids`. This is usually a recommended product from another category shown on the listing page. |
 | `unparsed_promotion` | A promotion was shown but could not be parsed (invalid date, or Multikup without readable tiers). |
 | `unparsed_shelf_life` | The shelf-life value is not in days. |
 | `low_classification_confidence` | The classification confidence is below the configured threshold. |
+
+## Discovery manifest
+
+In category mode (`--category-products`) the CLI first writes `discovery-<run_id>.json` next to the observations file. It contains no prices, only which URLs were going to be scraped:
+
+| Field | Description |
+| --- | --- |
+| `schema_version` | Manifest format version, currently `"0.1"`. |
+| `run_id`, `discovered_at` | The run the manifest belongs to, and the UTC time of discovery. |
+| `listings[]` | One item per category: `category_id`, `category_name`, `url`, `product_urls`, `load_more_clicks` (`null` when unknown), and `complete`. `complete` is `false` when the product list may be truncated. |
+| `missing_category_ids` | Whitelisted ids that were not found in Kosik's categories sitemap. |
+
+It is useful for coverage checks: compare `product_urls` with the observations that were actually written.
 
 ## Suggested split into tables
 
 This is a suggestion for the schema author, not something the scraper does.
 
-- **product**: key `(retailer, retailer_product_id)`. Columns: `url`, `name`, `brand`, `package_*`, `retailer_category_id`, `retailer_category_path`, `country_of_origin`, `min_shelf_life_days`. Static fields can change over time, so keep the latest values or track their history.
+- **product**: key `(retailer, retailer_product_id)`. Columns: `url`, `name`, `brand`, `package_*`, `retailer_category_id`, `retailer_category_path`, `retailer_category_ids`, `country_of_origin`, `min_shelf_life_days`. Static fields can change over time, so keep the latest values or track their history.
 - **price_observation**: key `(retailer, retailer_product_id, scraped_at)` or a surrogate id. Columns: `run_id`, `source_listing_url`, `currency`, `shelf_price`, `regular_price`, `unit_price_*`, `in_stock`, `extraction_*`.
 - **promotion**: one row per item of `promotions[]`, referencing `price_observation`.
 - **classification**: referencing `product`, or the observation if classifications should be versioned per run. Use `model`, `prompt_version` and `classified_at` to compare classifier versions.

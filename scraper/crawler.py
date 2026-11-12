@@ -1,4 +1,4 @@
-"""Crawl4AI browser integration for public Kosik product pages."""
+"""Crawl4AI browser integration for public Kosik pages and product URL discovery."""
 
 from __future__ import annotations
 
@@ -6,6 +6,8 @@ import asyncio
 import hashlib
 import re
 import xml.etree.ElementTree as ET
+from collections.abc import Sequence
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
@@ -13,6 +15,7 @@ from urllib.parse import urlparse, urlunparse
 import httpx
 
 from .config import ScraperSettings, get_scraper_settings
+from .discovery import CategoryEntry, CategoryListing, DiscoveryManifest, category_id_from_url
 
 
 class CrawlError(RuntimeError):
@@ -21,7 +24,32 @@ class CrawlError(RuntimeError):
 
 SITEMAP_URL = "https://www.kosik.sk/sitemap.xml"
 _KOSIK_HOSTS = {"www.kosik.sk", "kosik.sk"}
-_CATEGORY_WHITELIST = {"/c3365-slaniny"}
+LOAD_MORE_MAX_CLICKS = 30
+# The load-more script stores its result on <body> so it survives into the returned HTML.
+_LOAD_MORE_MARKER = re.compile(r'data-parky-load-more="clicks=(\d+);exhausted=([01])"')
+_LOAD_MORE_SCRIPT = """
+    (async () => {
+        let clicks = 0;
+        let exhausted = false;
+        const productLinks = () => document.querySelectorAll('a[href*="/p"]').length;
+        const findButton = () => Array.from(document.querySelectorAll("button"))
+            .find((item) => /načítať ďalšie/i.test(item.innerText));
+        for (; clicks < %(max_clicks)d; ) {
+            const button = findButton();
+            if (!button) { exhausted = true; break; }
+            const before = productLinks();
+            button.click();
+            clicks += 1;
+            for (let wait = 0; wait < 50; wait++) {
+                await new Promise((resolve) => setTimeout(resolve, 100));
+                if (productLinks() > before) break;
+            }
+            if (productLinks() <= before) break;
+        }
+        if (!exhausted && !findButton()) exhausted = true;
+        document.body.setAttribute("data-parky-load-more", `clicks=${clicks};exhausted=${exhausted ? 1 : 0}`);
+    })()
+""" % {"max_clicks": LOAD_MORE_MAX_CLICKS}
 
 
 class _ProductLinkParser(HTMLParser):
@@ -83,8 +111,20 @@ class KosikCrawler:
             urls.update(self._product_urls(self._parse_sitemap(content, product_sitemap)))
         return sorted(urls)
 
-    async def discover_category_product_urls(self, sitemap_url: str = SITEMAP_URL) -> list[str]:
-        """Discover product links from the explicitly whitelisted category pages."""
+    async def discover_category_listings(
+        self,
+        categories: Sequence[CategoryEntry],
+        sitemap_url: str = SITEMAP_URL,
+    ) -> DiscoveryManifest:
+        """Find product URLs on the whitelisted category pages, grouped by category.
+
+        Category pages are located in Kosik's categories sitemap by category id,
+        so a changed URL slug does not drop a category. Whitelisted ids that are
+        not in the sitemap are reported in ``missing_category_ids``.
+        """
+
+        if not categories:
+            raise CrawlError("No categories selected for discovery")
         sitemap_xml = await self._fetch_sitemap(sitemap_url)
         root = self._parse_sitemap(sitemap_xml, sitemap_url)
         categories_url = self._child_sitemap_url(root, "categories.xml")
@@ -92,18 +132,33 @@ class KosikCrawler:
             raise CrawlError(f"No categories sitemap found at {sitemap_url}")
 
         categories_xml = await self._fetch_sitemap(categories_url)
-        categories_root = self._parse_sitemap(categories_xml, categories_url)
-        category_urls = self._whitelisted_category_urls(categories_root)
-        if not category_urls:
-            raise CrawlError(f"No whitelisted categories found at {categories_url}")
+        urls_by_id = self._category_urls_by_id(self._parse_sitemap(categories_xml, categories_url))
+        missing = [category.id for category in categories if category.id not in urls_by_id]
+        if len(missing) == len(categories):
+            raise CrawlError(f"None of the whitelisted categories were found at {categories_url}")
 
-        product_urls: set[str] = set()
-        for category_url in category_urls:
+        listings: list[CategoryListing] = []
+        for category in categories:
+            category_url = urls_by_id.get(category.id)
+            if category_url is None:
+                continue
             html = await self.crawl(category_url, load_all=True, save_debug=False)
-            product_urls.update(self._product_links(html, category_url))
-        if not product_urls:
-            raise CrawlError("No product links found on whitelisted Kosik category pages")
-        return sorted(product_urls)
+            clicks, exhausted = self._load_more_state(html)
+            listings.append(
+                CategoryListing(
+                    category_id=category.id,
+                    category_name=category.name,
+                    url=category_url,
+                    product_urls=self._product_links(html, category_url),
+                    load_more_clicks=clicks,
+                    complete=exhausted is True,
+                )
+            )
+        return DiscoveryManifest(
+            discovered_at=datetime.now(timezone.utc),
+            listings=listings,
+            missing_category_ids=missing,
+        )
 
     async def crawl(
         self,
@@ -120,24 +175,7 @@ class KosikCrawler:
             raise CrawlError("Crawl4AI is required for live scraping; install requirements.txt") from exc
         await self._delay()
         browser = BrowserConfig(headless=True, user_agent=self.settings.user_agent)
-        js_code = None
-        if load_all:
-            js_code = """
-                (async () => {
-                    for (let i = 0; i < 30; i++) {
-                        const button = Array.from(document.querySelectorAll("button"))
-                            .find((item) => /načítať ďalšie/i.test(item.innerText));
-                        if (!button) break;
-                        const before = document.querySelectorAll('a[href*="/p"]').length;
-                        button.click();
-                        for (let wait = 0; wait < 50; wait++) {
-                            await new Promise((resolve) => setTimeout(resolve, 100));
-                            if (document.querySelectorAll('a[href*="/p"]').length > before) break;
-                        }
-                        if (document.querySelectorAll('a[href*="/p"]').length <= before) break;
-                    }
-                })()
-            """
+        js_code = _LOAD_MORE_SCRIPT if load_all else None
         run_config = CrawlerRunConfig(
             page_timeout=int(self.settings.page_timeout_seconds * 1000),
             wait_for="js:() => document.querySelector('#kosik-app2')?.innerText.trim().length > 50",
@@ -230,10 +268,12 @@ class KosikCrawler:
         return urls
 
     @classmethod
-    def _whitelisted_category_urls(cls, root: ET.Element) -> list[str]:
+    def _category_urls_by_id(cls, root: ET.Element) -> dict[str, str]:
+        """Map category id (``c3365``) to its canonical URL from the categories sitemap."""
+
         if cls._xml_name(root.tag) != "urlset":
             raise CrawlError("Categories sitemap does not contain a URL set")
-        category_urls = set()
+        urls: dict[str, str] = {}
         for entry in root:
             if cls._xml_name(entry.tag) != "url":
                 continue
@@ -241,9 +281,19 @@ class KosikCrawler:
             if not location or not cls._is_kosik_url(location):
                 continue
             parsed = urlparse(location)
-            if parsed.path in _CATEGORY_WHITELIST:
-                category_urls.add(urlunparse(("https", parsed.netloc, parsed.path, "", "", "")))
-        return sorted(category_urls)
+            category_id = category_id_from_url(parsed.path)
+            if category_id and category_id not in urls:
+                urls[category_id] = urlunparse(("https", parsed.netloc, parsed.path, "", "", ""))
+        return urls
+
+    @staticmethod
+    def _load_more_state(html: str) -> tuple[int | None, bool | None]:
+        """Clicks made and whether the list was fully loaded; ``(None, None)`` if unknown."""
+
+        match = _LOAD_MORE_MARKER.search(html)
+        if match is None:
+            return None, None
+        return int(match.group(1)), match.group(2) == "1"
 
     @classmethod
     def _product_links(cls, html: str, category_url: str) -> list[str]:

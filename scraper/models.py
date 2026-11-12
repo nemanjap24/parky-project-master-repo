@@ -104,6 +104,7 @@ class ProductObservation(_Strict):
     package: Package | None = None
     retailer_category_id: str | None = None
     retailer_category_path: list[str] = Field(default_factory=list)
+    retailer_category_ids: list[str | None] = Field(default_factory=list)
     country_of_origin: str | None = None
     min_shelf_life_days: int | None = Field(default=None, ge=0)
 
