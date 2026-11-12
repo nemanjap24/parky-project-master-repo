@@ -8,7 +8,7 @@ from scraper.models import ScrapedProduct
 
 def test_valid_product_model() -> None:
     product = ScrapedProduct(url="https://www.kosik.sk/product/x", scraped_at=datetime.now(timezone.utc), raw_title="Milk", price=1.2)
-    assert product.retailer == "Kosik"
+    assert product.retailer == "kosik"
 
 
 def test_invalid_price_type() -> None:
