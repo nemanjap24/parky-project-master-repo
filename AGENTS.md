@@ -15,6 +15,7 @@ The current repository deliberately covers only an early slice of that goal: scr
 | `qwen_classifier/` | Qwen/Ollama classification package. `client.py` contains `QwenClassifier`; `prompts.py` builds the constrained classification prompt; `models.py` defines Pydantic response contracts; `config.py` reads Ollama settings; `cli.py` is run with `python -m qwen_classifier.cli`. Its `tests/` validate prompts, models, and mocked HTTP behavior. |
 | `README.md` | User-facing setup, configuration, usage, architecture summary, and test documentation. |
 | `docs/output-format.md` | Field-by-field description of the JSONL output and warning codes; the basis for the future database schema. Keep it in sync with `scraper/models.py`. |
+| `docs/known-issues.md` | Open problems and follow-ups with evidence and proposed fixes. |
 | `docs/scraper-model-v2.md` | Task specification that introduced output schema 0.2. |
 | `requirements.txt` | Runtime and test dependencies: Crawl4AI, HTTP client, Pydantic, dotenv, and pytest. |
 | `.env.example` | Template for required local scraper and Ollama configuration. Copy it to `.env`; do not put real credentials in it. |
@@ -210,6 +211,8 @@ A live manual test is appropriate only when changing browser rendering, Kosik se
 - Evaluate prediction accuracy and economic impact, and document limitations.
 
 ## Current limitations
+
+Open issues with evidence and proposed fixes are tracked in `docs/known-issues.md`; update it when you fix or find one.
 
 - The category whitelist currently holds only example categories; the team still has to fill in the ~16 subcategories and their days.
 - Category discovery depends on clicking "Načítať ďalšie" (at most 30 clicks). The result is reported through a `data-parky-load-more` marker on `<body>`; a listing is marked `complete: false` when the limit is hit or the marker is missing. Whether Kosik offers URL-based pagination has not been checked.
