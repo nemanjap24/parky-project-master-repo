@@ -130,6 +130,7 @@ python -m qwen_classifier.cli \
 | `OLLAMA_BASE_URL` | classifier | Base URL of the Ollama-compatible service. | No |
 | `OLLAMA_API_KEY` | classifier | Bearer token sent to Ollama. | **Yes** |
 | `OLLAMA_MODEL` | classifier | Ollama model name, such as `qwen3:30b`. | No |
+| `OLLAMA_TIMEOUT_SECONDS` | classifier | HTTP timeout for one Ollama request; default `120`. | No |
 
 `OLLAMA_API_KEY` must never be committed, hardcoded, printed, logged, or included in examples. Keep it only in an ignored local environment source or an approved secret manager. The classifier requires `OLLAMA_BASE_URL`, `OLLAMA_API_KEY`, and `OLLAMA_MODEL` when it is constructed.
 

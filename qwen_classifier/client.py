@@ -76,7 +76,10 @@ class QwenClassifier:
                 headers=headers,
             )
         except httpx.TimeoutException as exc:
-            raise RuntimeError("Request to Ollama timed out") from exc
+            raise RuntimeError(
+                f"Request to Ollama timed out after {self.settings.timeout_seconds:g} s "
+                "(raise OLLAMA_TIMEOUT_SECONDS if needed)"
+            ) from exc
         except httpx.RequestError as exc:
             raise RuntimeError(f"Request to Ollama failed: {exc}") from exc
 

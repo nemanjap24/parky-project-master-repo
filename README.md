@@ -37,9 +37,10 @@ Classification additionally requires:
 OLLAMA_BASE_URL=https://ollama.example.invalid
 OLLAMA_API_KEY=<your-secret>
 OLLAMA_MODEL=qwen3:30b
+OLLAMA_TIMEOUT_SECONDS=120
 ```
 
-`CLASSIFICATION_CONFIDENCE_THRESHOLD` must be between `0` and `1`. `CLASSIFICATION_ENABLED` is read by scraper configuration and defaults to `false`; the scraper CLI enables classification explicitly with `--classify`. Never commit, print, or log `OLLAMA_API_KEY`.
+`CLASSIFICATION_CONFIDENCE_THRESHOLD` must be between `0` and `1`. `OLLAMA_TIMEOUT_SECONDS` is the HTTP timeout for one Ollama request (default `120`, must be greater than `0`). `CLASSIFICATION_ENABLED` is read by scraper configuration and defaults to `false`; the scraper CLI enables classification explicitly with `--classify`. Never commit, print, or log `OLLAMA_API_KEY`.
 
 ## Run the scraper
 
