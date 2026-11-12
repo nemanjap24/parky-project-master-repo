@@ -83,6 +83,12 @@ Collect Friday's whitelisted categories with classification:
 python -m scraper.cli --category-products --day fri --classify
 ```
 
+Test one category with a small product limit:
+
+```bash
+python -m scraper.cli --category-products --category c3365 --limit 15 --classify --output output/test-slaniny.jsonl
+```
+
 Resume an interrupted run from its discovery manifest:
 
 ```bash

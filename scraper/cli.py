@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import re
 import sys
 from collections.abc import Sequence
 from datetime import datetime, timezone
@@ -12,6 +13,7 @@ from pathlib import Path
 from .config import get_scraper_settings
 from .discovery import (
     DEFAULT_CATEGORIES_CONFIG,
+    CategoryEntry,
     DiscoveryManifest,
     load_category_whitelist,
     read_manifest,
@@ -67,6 +69,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="With --category-products: only categories planned for this day",
     )
     parser.add_argument(
+        "--category",
+        action="append",
+        metavar="ID",
+        help="With --category-products: only this Kosik category id (e.g. c3365), "
+        "whether whitelisted or not; may be repeated",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Scrape at most N products in total in this run (for test runs)",
+    )
+    parser.add_argument(
         "--skip-existing",
         action="store_true",
         help="Skip product URLs that already have a record in the output file",
@@ -75,8 +91,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.source_listing_url and not args.url:
         parser.error("--source-listing-url can only be used with --url")
-    if args.day and not args.category_products:
-        parser.error("--day can only be used with --category-products")
+    if (args.day or args.category) and not args.category_products:
+        parser.error("--day and --category can only be used with --category-products")
+    if args.day and args.category:
+        parser.error("use either --day or --category, not both")
+    invalid = [value for value in args.category or [] if not re.fullmatch(r"c\d+", value)]
+    if invalid:
+        parser.error(f"--category expects ids like c3365, got: {', '.join(invalid)}")
+    if args.limit is not None and args.limit < 1:
+        parser.error("--limit must be at least 1")
     return args
 
 
@@ -94,6 +117,14 @@ def _report(manifest: DiscoveryManifest, manifest_path: Path | None) -> None:
         print(f"  WARNING: not in Kosik's categories sitemap: {', '.join(manifest.missing_category_ids)}")
 
 
+def _selected_categories(args: argparse.Namespace) -> list[CategoryEntry]:
+    whitelist = load_category_whitelist(args.categories_config)
+    if not args.category:
+        return whitelist.for_day(args.day)
+    names = {entry.id: entry.name for entry in whitelist.categories}
+    return [CategoryEntry(id=value, name=names.get(value, value)) for value in dict.fromkeys(args.category)]
+
+
 async def _batches(args: argparse.Namespace, pipeline: ScrapingPipeline, output: Path, run_id: str) -> list[Batch]:
     if args.url:
         return [(args.source_listing_url, args.url)]
@@ -103,7 +134,7 @@ async def _batches(args: argparse.Namespace, pipeline: ScrapingPipeline, output:
         manifest = read_manifest(args.from_manifest)
         _report(manifest, None)
     else:
-        categories = load_category_whitelist(args.categories_config).for_day(args.day)
+        categories = _selected_categories(args)
         if not categories:
             raise ValueError(f"No categories in {args.categories_config} for day {args.day!r}")
         manifest = await pipeline.crawler.discover_category_listings(categories)
@@ -145,6 +176,10 @@ async def run(
         with JsonlWriter(output) as writer:
             for source_listing_url, product_urls in batches:
                 urls = [url for url in dict.fromkeys(product_urls) if url not in seen]
+                if args.limit is not None:
+                    urls = urls[: args.limit - writer.count]
+                if not urls:
+                    continue
                 seen.update(urls)
                 await pipeline.scrape_many(
                     urls,

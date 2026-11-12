@@ -61,6 +61,14 @@ python -m scraper.cli --category-products --day fri --classify
 3. The URLs are saved per category to `discovery-<run_id>.json` next to the output file before any product is scraped.
 4. Products are scraped category by category with `source_listing_url` set. A product listed in several categories is scraped once, under the first one. If a product's own breadcrumb is not under the listing category (for example a recommended product), the record gets the warning `outside_listing_category`.
 
+For a small test run on one category (whitelisted or not) with at most 15 products:
+
+```bash
+python -m scraper.cli --category-products --category c3365 --limit 15 --classify --output output/test-slaniny.jsonl
+```
+
+`--category ID` (repeatable) replaces the whitelist selection; `--limit N` caps the number of scraped products for the whole run. Discovery still loads the full category and the manifest lists every URL found; only scraping stops after `N` products.
+
 To resume an interrupted run without discovering again, scraping only the products that are still missing:
 
 ```bash

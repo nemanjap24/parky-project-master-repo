@@ -222,3 +222,64 @@ def test_invalid_option_combinations_are_rejected() -> None:
         parse_args(["--url", NORD_SVIT, "--day", "fri"])
     with pytest.raises(SystemExit):
         parse_args(["--url", NORD_SVIT, "--category-products"])
+
+
+def test_category_option_selects_any_category_and_limit_caps_the_run(tmp_path: Path) -> None:
+    output = tmp_path / "obs.jsonl"
+    argv = [
+        "--category-products",
+        "--category", "c3365",
+        "--category", "c3350",
+        "--limit", "2",
+        "--categories-config", str(_whitelist(tmp_path)),
+        "--output", str(output),
+    ]  # fmt: skip
+
+    _, run_id, count = asyncio.run(run(parse_args(argv), pipeline=_pipeline(DiscoveringCrawler()), now=NOW))
+
+    assert count == 2
+    records = read_observations(output)
+    assert [(r.retailer_product_id, r.source_listing_url) for r in records] == [
+        ("7224", SLANINY_LISTING),
+        ("7004", SLANINY_LISTING),
+    ]
+    from scraper.discovery import read_manifest
+
+    manifest = read_manifest(tmp_path / f"discovery-{run_id}.json")
+    assert [listing.category_id for listing in manifest.listings] == ["c3365", "c3350"]
+    assert manifest.product_count == 3  # the manifest keeps the full discovery, only scraping is limited
+
+
+def test_category_option_accepts_ids_outside_the_whitelist(tmp_path: Path) -> None:
+    class RecordingCrawler(DiscoveringCrawler):
+        async def discover_category_listings(self, categories):  # type: ignore[no-untyped-def]
+            self.selected = [(c.id, c.name) for c in categories]
+            return await super().discover_category_listings(categories)
+
+    crawler = RecordingCrawler()
+    argv = ["--category-products", "--category", "c2968", "--category", "c3350", "--categories-config", str(_whitelist(tmp_path)),
+            "--output", str(tmp_path / "obs.jsonl")]  # fmt: skip
+    asyncio.run(run(parse_args(argv), pipeline=_pipeline(crawler), now=NOW))
+    assert crawler.selected == [("c2968", "c2968"), ("c3350", "Párky")]
+
+
+def test_limit_also_applies_to_url_mode(tmp_path: Path) -> None:
+    output = tmp_path / "obs.jsonl"
+    argv = ["--url", NORD_SVIT, "--url", TAURIS, "--limit", "1", "--output", str(output)]
+    _, _, count = asyncio.run(run(parse_args(argv), pipeline=_pipeline(FixtureCrawler()), now=NOW))
+    assert count == 1
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--url", NORD_SVIT, "--category", "c3365"],
+        ["--category-products", "--category", "3365"],
+        ["--category-products", "--category", "/c3365-slaniny"],
+        ["--category-products", "--day", "fri", "--category", "c3365"],
+        ["--url", NORD_SVIT, "--limit", "0"],
+    ],
+)
+def test_invalid_category_and_limit_options(argv: list[str]) -> None:
+    with pytest.raises(SystemExit):
+        parse_args(argv)
