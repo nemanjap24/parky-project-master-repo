@@ -21,7 +21,7 @@ The current repository deliberately covers only an early slice of that goal: scr
 | `requirements.txt` | Runtime and test dependencies: Crawl4AI, HTTP client, Pydantic, dotenv, and pytest. |
 | `.env.example` | Template for required local scraper and Ollama configuration. Copy it to `.env`; do not put real credentials in it. |
 | `pytest.ini` | Pytest configuration; adds the repository root to `pythonpath`. |
-| `.github/workflows/tests.yml` | GitHub Actions CI: installs `requirements.txt` and runs `pytest` on Python 3.10 and 3.12 for pull requests and pushes to `master`. |
+| `.github/workflows/tests.yml` | GitHub Actions CI: installs `requirements.txt` and runs `pytest` on Python 3.10 (minimum) and 3.14 (newest version all dependencies support) for pull requests and pushes to `master`. |
 | `.gitignore` | Ignores Python/build artifacts, virtual environments, `.env`, generated scraper output (`scraper/output/` and `output/`), and other local artifacts. |
 
 ## Current architecture
