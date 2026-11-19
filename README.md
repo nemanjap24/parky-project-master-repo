@@ -9,6 +9,7 @@ Scrapes publicly accessible, JavaScript-rendered grocery product pages from kosi
 - `scraper/tests` and `qwen_classifier/tests`: offline tests using rendered-page fixtures and mocked HTTP clients.
 - `docs/output-format.md`: field-by-field description of the output, written as the basis for the database schema.
 - `docs/known-issues.md`: open problems and follow-ups.
+- `docs/what-not-to-commit.md`: what must stay out of git, and the checklist to run before every commit.
 
 ## Installation
 

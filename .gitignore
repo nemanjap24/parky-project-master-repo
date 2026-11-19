@@ -223,3 +223,23 @@ __marimo__/
 scraper/output/
 output/
 /.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local AI agent settings and scratch output
+.claude/settings.local.json
+Claude outputs/
+
+# Secrets and keys
+*.pem
+*.key
+.env.*
+!.env.example
+
+# Database dumps, backups and exported datasets
+*.dump
+*.sql.gz
+backups/
+*.parquet

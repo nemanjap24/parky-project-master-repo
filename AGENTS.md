@@ -16,6 +16,7 @@ The current repository deliberately covers only an early slice of that goal: scr
 | `README.md` | User-facing setup, configuration, usage, architecture summary, and test documentation. |
 | `docs/output-format.md` | Field-by-field description of the JSONL output and warning codes; the basis for the future database schema. Keep it in sync with `scraper/models.py`. |
 | `docs/known-issues.md` | Open problems and follow-ups with evidence and proposed fixes. |
+| `docs/what-not-to-commit.md` | What must never be committed (secrets, generated output, local files) and the pre-commit checklist. Binding for agents. |
 | `docs/scraper-model-v2.md` | Task specification that introduced output schema 0.2. |
 | `requirements.txt` | Runtime and test dependencies: Crawl4AI, HTTP client, Pydantic, dotenv, and pytest. |
 | `.env.example` | Template for required local scraper and Ollama configuration. Copy it to `.env`; do not put real credentials in it. |
@@ -172,6 +173,7 @@ A live manual test is appropriate only when changing browser rendering, Kosik se
 - Never bypass CAPTCHA, authentication, bot protection, rate limits, or robots restrictions.
 - Use only publicly accessible pages.
 - Never store or expose credentials.
+- Before committing, follow `docs/what-not-to-commit.md`: stage files by name, read `git diff --staged`, and never commit `.env`, generated output, rendered HTML, or `Claude outputs/`.
 - Preserve request delays; do not add aggressive parallel scraping.
 - Do not commit output files that may contain sensitive operational data.
 - Treat rendered HTML/debug output and API error text as potentially sensitive operational artifacts; keep them out of commits and logs unless explicitly reviewed and safe.
@@ -232,5 +234,5 @@ Open issues with evidence and proposed fixes are tracked in `docs/known-issues.m
 4. Add or update tests.
 5. Run `pytest`.
 6. Update documentation when behavior or architecture changes.
-7. Do not commit secrets.
+7. Do not commit secrets, generated output, or local files; follow `docs/what-not-to-commit.md`.
 8. Do not claim live scraping or Ollama integration was tested unless it was actually run.
