@@ -21,6 +21,7 @@ The current repository deliberately covers only an early slice of that goal: scr
 | `requirements.txt` | Runtime and test dependencies: Crawl4AI, HTTP client, Pydantic, dotenv, and pytest. |
 | `.env.example` | Template for required local scraper and Ollama configuration. Copy it to `.env`; do not put real credentials in it. |
 | `pytest.ini` | Pytest configuration; adds the repository root to `pythonpath`. |
+| `.github/workflows/tests.yml` | GitHub Actions CI: installs `requirements.txt` and runs `pytest` on Python 3.10 and 3.12 for pull requests and pushes to `master`. |
 | `.gitignore` | Ignores Python/build artifacts, virtual environments, `.env`, generated scraper output (`scraper/output/` and `output/`), and other local artifacts. |
 
 ## Current architecture
@@ -164,7 +165,7 @@ Run the complete suite with:
 pytest
 ```
 
-All current tests are offline. `scraper/tests/test_regression_kosik.py` pins expected values for six real rendered pages in `scraper/fixtures/kosik_*.html`, including the Multikup shelf-price regression, dated discounts, "Dorovnaná cena", and an empty `warnings` list. Pipeline and CLI tests inject fake crawler and classifier implementations and write to `tmp_path`. When a Kosik markup change breaks extraction, add the new rendered page as a fixture with pinned expectations; review it for sensitive data first. Classifier client tests use `httpx.MockTransport`; they do not contact Ollama.
+All current tests are offline. CI runs the same suite on every pull request; keep it green. `scraper/tests/test_regression_kosik.py` pins expected values for six real rendered pages in `scraper/fixtures/kosik_*.html`, including the Multikup shelf-price regression, dated discounts, "Dorovnaná cena", and an empty `warnings` list. Pipeline and CLI tests inject fake crawler and classifier implementations and write to `tmp_path`. When a Kosik markup change breaks extraction, add the new rendered page as a fixture with pinned expectations; review it for sensitive data first. Classifier client tests use `httpx.MockTransport`; they do not contact Ollama.
 
 A live manual test is appropriate only when changing browser rendering, Kosik selectors, or real Ollama integration, and only after the offline tests pass. Keep live scraping sequential, publicly accessible, respectful, and rate-limited by `SCRAPER_REQUEST_DELAY_SECONDS`. Do not present a live scrape or Ollama result as tested unless it was actually run.
 
