@@ -180,4 +180,6 @@ pytest
 
 The suite runs offline. Regression tests parse six real rendered Kosik pages in `scraper/fixtures/kosik_*.html`: sausages with Multikup, lemons and fries with a dated discount, bacon with "Dorovnaná cena", and oranges. Pipeline and CLI tests use a fake crawler, and classifier tests use `httpx.MockTransport`.
 
+GitHub Actions (`.github/workflows/tests.yml`) runs `pytest` on Python 3.10 (minimum) and 3.14 (newest version all dependencies support) for every pull request and every push to `master`.
+
 `python -m scraper.cli --help` and `python -m qwen_classifier.cli --help` are available without network access. Live scraping is sequential, rate-limited, and limited to public pages; it does not bypass CAPTCHA, authentication, bot protection, rate limits, or robots restrictions. Selectors may require maintenance if Kosik changes its page markup.
